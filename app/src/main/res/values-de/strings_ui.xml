@@ -444,4 +444,6 @@
     </plurals>
     <string name="pump_fail_sim_title">Der Simulator ist eingeschaltet</string>
     <string name="pump_fail_sim_body">Solange die simulierte Pumpe eingeschaltet ist, kann keine echte Pumpe gekoppelt werden. Schalten Sie zuerst den Simulator in den Entwicklereinstellungen aus.</string>
+    <string name="ui_share_log">Protokoll teilen</string>
+    <string name="wz_pump_fail_detail_label">Technische Details</string>
 </resources>

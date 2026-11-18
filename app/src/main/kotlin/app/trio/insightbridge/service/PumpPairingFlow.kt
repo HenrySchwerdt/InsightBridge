@@ -19,6 +19,8 @@ import app.aaps.pump.insight.exceptions.TimeoutException
 import app.aaps.pump.insight.exceptions.satl_errors.SatlPairingRejectedException
 import app.aaps.pump.insight.utils.PumpLog
 import app.trio.insightbridge.BridgeRuntime
+import app.trio.insightbridge.util.LogLine
+import app.trio.insightbridge.util.LogShare
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,7 +40,7 @@ sealed interface PumpPairState {
     data class ShowCode(val code: String) : PumpPairState
     data object Finishing : PumpPairState
     data object Done : PumpPairState
-    data class Failed(val reason: PumpPairFailure) : PumpPairState
+    data class Failed(val reason: PumpPairFailure, val detail: String? = null) : PumpPairState
 }
 
 /**
@@ -47,6 +49,9 @@ sealed interface PumpPairState {
  */
 @SuppressLint("MissingPermission") // permissions are requested by the wizard before this runs
 class PumpPairingFlow(private val rt: BridgeRuntime) {
+
+    /** Current log lines, for the "share log" action on failure screens. */
+    fun logLines(): List<LogLine> = rt.log.flow.value
 
     private val ctx: Context = rt.app
     private val _state = MutableStateFlow<PumpPairState>(PumpPairState.Idle)
@@ -129,13 +134,16 @@ class PumpPairingFlow(private val rt: BridgeRuntime) {
         val ex = object : InsightConnection.ExceptionCallback {
             override fun onExceptionOccur(e: Exception?) {
                 if (_state.value is PumpPairState.Done) return
+                val detail = LogShare.describe(e)
+                PumpLog.e("Pump pairing failed: ${detail ?: "unknown"}")
                 _state.value = PumpPairState.Failed(
                     when (e) {
                         is SatlPairingRejectedException -> PumpPairFailure.REJECTED
                         is TimeoutException -> PumpPairFailure.TIMEOUT
                         is ConnectionFailedException -> PumpPairFailure.CONNECTION_FAILED
                         else -> PumpPairFailure.OTHER
-                    }
+                    },
+                    detail
                 )
                 release()
             }
@@ -150,7 +158,7 @@ class PumpPairingFlow(private val rt: BridgeRuntime) {
             conn.pair(address)
         } catch (t: Throwable) {
             PumpLog.e("pair() failed", t)
-            _state.value = PumpPairState.Failed(PumpPairFailure.OTHER)
+            _state.value = PumpPairState.Failed(PumpPairFailure.OTHER, LogShare.describe(t))
             release()
         }
     }

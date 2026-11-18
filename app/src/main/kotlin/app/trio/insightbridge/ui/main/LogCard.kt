@@ -47,5 +47,11 @@ fun LogCard(lines: List<LogLine>, modifier: Modifier = Modifier) {
         ) {
             Text(text.ifEmpty { stringResource(R.string.ui_log_empty) }, style = IbMono, color = c.foreground)
         }
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        app.trio.insightbridge.ui.components.BigButton(
+            stringResource(R.string.ui_share_log),
+            { app.trio.insightbridge.util.LogShare.share(ctx, lines) },
+            style = app.trio.insightbridge.ui.components.ButtonStyle.Secondary
+        )
     }
 }

@@ -309,6 +309,16 @@ private fun PumpFailed(a: PumpStepArgs, s: PumpPairState.Failed) {
         RuledCard(rule = IbTheme.colors.danger, container = IbTheme.colors.dangerContainer) {
             Text(stringResource(Troubles.failureBodyRes(s.reason)), style = MaterialTheme.typography.bodyLarge, color = IbTheme.colors.onDangerContainer)
         }
+        s.detail?.let { detail ->
+            Text(stringResource(R.string.wz_pump_fail_detail_label), style = MaterialTheme.typography.labelLarge, color = IbTheme.colors.mutedForeground)
+            Text(detail, style = app.trio.insightbridge.ui.theme.IbMono, color = IbTheme.colors.foreground)
+        }
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        BigButton(
+            stringResource(R.string.ui_share_log),
+            { app.trio.insightbridge.util.LogShare.share(ctx, a.flow.logLines()) },
+            style = app.trio.insightbridge.ui.components.ButtonStyle.Secondary
+        )
         WhatHappensNext(stringResource(R.string.wz_pump_fail_next))
     }
 }

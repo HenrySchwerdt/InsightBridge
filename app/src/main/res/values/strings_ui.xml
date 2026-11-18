@@ -444,4 +444,6 @@
     </plurals>
     <string name="pump_fail_sim_title">The simulator is on</string>
     <string name="pump_fail_sim_body">A real pump cannot be paired while the simulated pump is switched on. Switch the simulator off in the developer settings first.</string>
+    <string name="ui_share_log">Share log</string>
+    <string name="wz_pump_fail_detail_label">Technical details</string>
 </resources>
