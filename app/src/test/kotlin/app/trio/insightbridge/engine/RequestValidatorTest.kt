@@ -26,7 +26,37 @@ class RequestValidatorTest {
     private fun bolus(s: String) = RequestValidator.validateBolus(BigDecimal(s), limits)
 
     @Test fun bolusAcceptsMultiplesOfStepUpToMax() {
-        bolus("0.05"); bolus("0.10"); bolus("1.35"); bolus("2"); bolus("10.0"); bolus("9.95")
+        bolus("0.05"); bolus("0.10"); bolus("1.35"); bolus("2"); bolus("2.1"); bolus("5.0"); bolus("5.2"); bolus("9.8"); bolus("10.0")
+    }
+
+    @Test fun bolusStepGrowsWithTheAmountLikeAndroidApsInsightGrid() {
+        val base = BigDecimal("0.05")
+        fun step(a: String) = RequestValidator.bolusStepFor(BigDecimal(a), base).toPlainString()
+        assertThat(step("0.05")).isEqualTo("0.05")
+        assertThat(step("2")).isEqualTo("0.05")
+        assertThat(step("2.05")).isEqualTo("0.1")
+        assertThat(step("5")).isEqualTo("0.1")
+        assertThat(step("5.1")).isEqualTo("0.2")
+        assertThat(step("9.8")).isEqualTo("0.2")
+        assertThat(step("10")).isEqualTo("0.5")
+        assertThat(step("24.5")).isEqualTo("0.5")
+        // a pump that reports a coarser base step wins
+        assertThat(RequestValidator.bolusStepFor(BigDecimal("1"), BigDecimal("0.1")).toPlainString()).isEqualTo("0.1")
+    }
+
+    @Test fun bolusFromTenUnitsFollowsTheHalfUnitGrid() {
+        val wide = limits.copy(maxBolus = BigDecimal("25"))
+        RequestValidator.validateBolus(BigDecimal("10.5"), wide)
+        RequestValidator.validateBolus(BigDecimal("25"), wide)
+        assertInvalid { RequestValidator.validateBolus(BigDecimal("10.1"), wide) }
+    }
+
+    @Test fun bolusAboveTwoUnitsMustFollowTheCoarserGrid() {
+        assertInvalid { bolus("2.05") }   // needs 0.1 steps
+        assertInvalid { bolus("5.1") }    // above 5 U the grid is 0.2
+        assertInvalid { bolus("5.15") }
+        assertInvalid { bolus("9.9") }
+        assertInvalid { bolus("10.2") }   // from 10 U the grid is 0.5
     }
 
     @Test fun bolusRejectsZeroNegativeAndNonMultiples() {

@@ -28,4 +28,6 @@
     <string name="notif_permissions_text">Bluetooth-Berechtigungen fehlen, die Bridge kann nicht laufen. Öffnen Sie die App und erteilen Sie sie.</string>
     <string name="notif_not_running_title">InsightBridge läuft nicht</string>
     <string name="notif_not_running_text">Android hat den Start im Hintergrund nicht erlaubt. Tippen Sie, um die App zu öffnen und die Bridge zu starten.</string>
+    <string name="notif_name_hint_title">Bluetooth-Name des Telefons wurde geändert</string>
+    <string name="notif_name_hint_text">Eine frühere Version von InsightBridge hat den Bluetooth-Namen dieses Telefons in InsightBridge-XXXX geändert. Diese Version tut das nicht mehr. Sie können den Namen unter Einstellungen > Über das Telefon > Gerätename zurücksetzen.</string>
 </resources>

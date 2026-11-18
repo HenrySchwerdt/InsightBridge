@@ -31,7 +31,7 @@ class SimulatedPumpTest {
     }
 
     @Test fun bolusDeliversAtConfiguredRateAndHistoryHasProgrammedAndDelivered() {
-        val id = run { sim.deliverBolus(BigDecimal("3.0")) }
+        val id = run { sim.deliverBolus(BigDecimal("3.0")) }.bolusId
         assertThat(run { sim.getStatus() }.boluses!!.single().remaining).isEqualTo(3.0)
         now += 30_000 // 1 U at 2 U/min
         val mid = run { sim.getStatus() }.boluses!!.single()
@@ -51,7 +51,7 @@ class SimulatedPumpTest {
     }
 
     @Test fun cancelBolusReturnsDeliveredAndStopsDelivery() {
-        val id = run { sim.deliverBolus(BigDecimal("5.0")) }
+        val id = run { sim.deliverBolus(BigDecimal("5.0")) }.bolusId
         now += 60_000
         val delivered = run { sim.cancelBolus(id) }
         assertThat(delivered).isWithin(0.011).of(2.0)

@@ -13,62 +13,91 @@
  */
 package app.aaps.pump.insight.utils
 
-import app.aaps.pump.insight.utils.notifyAll
-import app.aaps.pump.insight.utils.wait
-import app.aaps.pump.insight.utils.waitMillis
-import app.aaps.pump.insight.utils.OutputStreamWriter.Companion.WRITE_AND_WAIT_TIMEOUT_MS
 import java.io.IOException
 import java.io.OutputStream
 
+/**
+ * Writer thread for the pump socket.
+ *
+ * The blocking `OutputStream.write` runs OUTSIDE the lock that guards the queue. In the AndroidAPS version it
+ * ran inside it, so a write blocked on a dead socket held that lock and every caller of [write] / [writeAndWait]
+ * (which hold the connection monitor) stalled behind it - the connection could not even time out. Now only
+ * short critical sections touch the queue, and [close] (which closes the stream, unblocking a stuck write with an
+ * IOException) never needs the lock.
+ */
 class OutputStreamWriter(outputStream: OutputStream, callback: Callback) : Thread() {
 
     private val outputStream: OutputStream
     private val callback: Callback
-    private val buffer = ByteBuf(BUFFER_SIZE)
+    private val lock = Any()
+    private val queue = ByteBuf(BUFFER_SIZE)
+    private var queuedTotal = 0L
+    private var writtenTotal = 0L
+
     override fun run() {
         try {
             while (!isInterrupted) {
-                synchronized(buffer) {
-                    if (buffer.filledSize != 0) {
-                        outputStream.write(buffer.readBytes())
-                        outputStream.flush()
-                        buffer.notifyAll()
-                    }
-                    buffer.wait()
+                val bytes: ByteArray
+                val upTo: Long
+                synchronized(lock) {
+                    while (queue.filledSize == 0) lock.wait()
+                    bytes = queue.readBytes()
+                    upTo = queuedTotal
+                }
+                outputStream.write(bytes) // may block: no lock held
+                outputStream.flush()
+                synchronized(lock) {
+                    writtenTotal = upTo
+                    lock.notifyAll()
                 }
             }
         } catch (e: IOException) {
-            if (!isInterrupted) callback.onErrorWhileWriting(e)
+            if (!isInterrupted) safeReport(e)
         } catch (ignored: InterruptedException) {
+        } catch (t: Throwable) {
+            PumpLog.e("Writer thread failure", t)
+            if (!isInterrupted) safeReport(IOException("Writer failure: ${t.javaClass.simpleName}"))
         } finally {
             try {
                 outputStream.close()
             } catch (e: IOException) {
             }
+            synchronized(lock) { lock.notifyAll() } // release anybody waiting in writeAndWait
+        }
+    }
+
+    private fun safeReport(e: Exception) {
+        try {
+            callback.onErrorWhileWriting(e)
+        } catch (t: Throwable) {
+            PumpLog.e("Writer error callback failed", t)
         }
     }
 
     fun write(bytes: ByteArray) {
-        synchronized(buffer) {
-            buffer.putBytes(bytes)
-            buffer.notifyAll()
+        synchronized(lock) {
+            queue.putBytes(bytes)
+            queuedTotal += bytes.size
+            lock.notifyAll()
         }
     }
 
-    /**
-     * Writes [bytes] and waits until the writer thread has flushed them, at most [WRITE_AND_WAIT_TIMEOUT_MS].
-     *
-     * The wait used to have no limit. If the writer thread had already stopped on an [IOException],
-     * nothing called notifyAll() any more and the caller waited forever - and the caller is the
-     * synchronized disconnect() of the connection service, so the whole service stalled with it (#5209).
-     */
+    /** Writes [bytes] and waits until the writer thread has flushed them, at most [WRITE_AND_WAIT_TIMEOUT_MS]. */
     fun writeAndWait(bytes: ByteArray) {
-        synchronized(buffer) {
-            buffer.putBytes(bytes)
-            buffer.notifyAll()
+        val deadline = System.currentTimeMillis() + WRITE_AND_WAIT_TIMEOUT_MS
+        synchronized(lock) {
+            queue.putBytes(bytes)
+            queuedTotal += bytes.size
+            val target = queuedTotal
+            lock.notifyAll()
             try {
-                buffer.waitMillis(WRITE_AND_WAIT_TIMEOUT_MS)
+                while (writtenTotal < target && isAlive) {
+                    val left = deadline - System.currentTimeMillis()
+                    if (left <= 0) break
+                    lock.waitMillis(left)
+                }
             } catch (e: InterruptedException) {
+                currentThread().interrupt()
             }
         }
     }
@@ -88,12 +117,13 @@ class OutputStreamWriter(outputStream: OutputStream, callback: Callback) : Threa
 
     companion object {
 
-        private const val BUFFER_SIZE = 1024
-        private const val WRITE_AND_WAIT_TIMEOUT_MS = 2000L
+        private const val BUFFER_SIZE = 4096
+        const val WRITE_AND_WAIT_TIMEOUT_MS = 2000L
     }
 
     init {
         name = javaClass.simpleName
+        isDaemon = true
         this.outputStream = outputStream
         this.callback = callback
     }

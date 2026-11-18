@@ -442,4 +442,6 @@
         <item quantity="one">Noch %1$d Sekunde</item>
         <item quantity="other">Noch %1$d Sekunden</item>
     </plurals>
+    <string name="pump_fail_sim_title">Der Simulator ist eingeschaltet</string>
+    <string name="pump_fail_sim_body">Solange die simulierte Pumpe eingeschaltet ist, kann keine echte Pumpe gekoppelt werden. Schalten Sie zuerst den Simulator in den Entwicklereinstellungen aus.</string>
 </resources>

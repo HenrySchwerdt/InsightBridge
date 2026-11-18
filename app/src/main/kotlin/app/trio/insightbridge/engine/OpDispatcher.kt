@@ -1,10 +1,8 @@
-/*
- * This file is part of InsightBridge (Copyright (C) InsightBridge contributors).
- * Licensed under the GNU Affero General Public License v3 or later, see the LICENSE file.
- */
 package app.trio.insightbridge.engine
 
+import app.aaps.pump.insight.utils.PumpLog
 import app.trio.insightbridge.backend.AlertCatalog
+import app.trio.insightbridge.backend.BolusStarted
 import app.trio.insightbridge.backend.PumpBackend
 import app.trio.insightbridge.protocol.ErrorCode
 import app.trio.insightbridge.protocol.PumpOpException
@@ -13,20 +11,26 @@ import app.trio.insightbridge.protocol.RequestParser
 import app.trio.insightbridge.protocol.Wire
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 
 /**
- * Decrypted request -> validation -> idempotency -> backend -> response.
+ * Decrypted request -> idempotency -> validation -> backend -> response.
  *
  * Safety invariants (PROTOCOL.md section 7) enforced here:
- *  - out-of-range values are rejected, never clamped ([RequestValidator]);
- *  - dosing commands are recorded IN_FLIGHT before they reach the pump and are never retried;
- *  - a repeated requestId returns the stored outcome without touching the pump;
- *  - dosing commands are serialised so two cannot interleave on the pump link.
+ *  - the requestId is recorded (persisted, "inProgress") BEFORE anything else happens, in particular before
+ *    any backend access: a replay can never be answered by a fresh failure and `getRequestOutcome` never says
+ *    `unknown` for a command that is about to run;
+ *  - out-of-range values are rejected, never clamped ([RequestValidator]); a rejection is recorded as the
+ *    (certain) outcome of that requestId;
+ *  - dosing commands are never retried; a stopped coroutine records an uncertain outcome instead of leaving
+ *    the entry in flight;
+ *  - state-changing commands (including `setDateTime`) are serialised so they cannot interleave on the link.
  */
 class OpDispatcher(
     private val backend: () -> PumpBackend?,
@@ -47,7 +51,9 @@ class OpDispatcher(
         return try {
             val request = RequestParser.parseRequest(frame)
             onRequest(request.op)
-            RequestValidator.validateStatic(request, Instant.ofEpochMilli(clock()), AlertCatalog.knownTypes)
+            if (request.requestIdOrNull == null) {
+                RequestValidator.validateStatic(request, Instant.ofEpochMilli(clock()), AlertCatalog.knownTypes)
+            }
             execute(id, request)
         } catch (e: PumpOpException) {
             Wire.error(id, e.code, e.message ?: e.code.wire, e.uncertain)
@@ -103,101 +109,128 @@ class OpDispatcher(
         }
         is Request.SetDateTime -> {
             val b = requireBackend()
-            readOp { b.setDateTime(request.utc, request.tzOffsetMinutes) }
+            // Changes the pump clock: serialised with the dosing commands, and a timeout / link loss after
+            // sending is uncertain (it may have been applied).
+            dosingMutex.withLock {
+                withBudget(dosingTimeoutMillis, uncertainOnTimeout = true) { b.setDateTime(request.utc, request.tzOffsetMinutes) }
+            }
             Wire.ok(id, Wire.emptyResult())
         }
         is Request.CancelBolus -> {
             val b = requireBackend()
             // Cancelling is time critical: not serialised behind other dosing commands.
-            val delivered = withTimeoutMapped(dosingTimeoutMillis, uncertainOnTimeout = true) { b.cancelBolus(request.bolusId) }
+            val delivered = withBudget(dosingTimeoutMillis, uncertainOnTimeout = true) { b.cancelBolus(request.bolusId) }
             Wire.ok(id, Wire.cancelBolusResult(delivered))
         }
-        is Request.DeliverBolus -> idempotent(id, request, fingerprint = "amount=${request.amount.stripTrailingZeros().toPlainString()}") { b ->
+        is Request.DeliverBolus -> idempotent(id, request, "amount=${request.amount.stripTrailingZeros().toPlainString()}", { b ->
             RequestValidator.validateBolus(request.amount, b.limits())
-        } run { b ->
-            val bolusId = b.deliverBolus(request.amount)
-            Wire.bolusResult(bolusId, request.amount)
+        }) { b ->
+            val started = b.deliverBolus(request.amount)
+            Wire.bolusResult(started.bolusId, started.amount)
         }
-        is Request.SetTbr -> idempotent(id, request, "percent=${request.percent};duration=${request.duration}") {} run { b ->
+        is Request.SetTbr -> idempotent(id, request, "percent=${request.percent};duration=${request.duration}", {}) { b ->
             b.setTbr(request.percent, request.duration)
             Wire.tbrResult(request.percent, request.duration)
         }
-        is Request.CancelTbr -> idempotent(id, request, "") {} run { b ->
+        is Request.CancelTbr -> idempotent(id, request, "", {}) { b ->
             b.cancelTbr()
             Wire.emptyResult()
         }
-        is Request.SetOperatingMode -> idempotent(id, request, "started=${request.started}") {} run { b ->
+        is Request.SetOperatingMode -> idempotent(id, request, "started=${request.started}", {}) { b ->
             b.setOperatingMode(request.started)
             Wire.modeResult(request.started)
         }
         is Request.SetBasalProfile -> idempotent(
             id, request,
-            request.segments.joinToString("|") { "${it.durationMinutes}:${it.rate.stripTrailingZeros().toPlainString()}" }
+            request.segments.joinToString("|") { "${it.durationMinutes}:${it.rate.stripTrailingZeros().toPlainString()}" },
+            { b -> RequestValidator.validateBasalProfile(request.segments, b.limits()) }
         ) { b ->
-            RequestValidator.validateBasalProfile(request.segments, b.limits())
-        } run { b ->
             Wire.profileResult(b.setBasalProfile(request.segments))
         }
     }
 
-    private suspend fun <T> readOp(block: suspend () -> T): T = withTimeoutMapped(readTimeoutMillis, uncertainOnTimeout = false, block = block)
+    private suspend fun <T> readOp(block: suspend () -> T): T = withBudget(readTimeoutMillis, uncertainOnTimeout = false, block = block)
 
-    private suspend fun <T> withTimeoutMapped(ms: Long, uncertainOnTimeout: Boolean, block: suspend () -> T): T = try {
-        withTimeout(ms) { block() }
+    /** Runs [block] with an [OpContext] budget; the backend shares the deadline between its inner steps. */
+    private suspend fun <T> withBudget(ms: Long, uncertainOnTimeout: Boolean, late: (Result<Any?>) -> Unit = {}, block: suspend () -> T): T = try {
+        withTimeout(ms + TIMEOUT_BACKSTOP_MS) {
+            withContext(OpContext(clock() + ms, clock, late)) { block() }
+        }
     } catch (e: TimeoutCancellationException) {
         throw PumpOpException(ErrorCode.PUMP_UNREACHABLE, "The pump did not answer in time", uncertain = uncertainOnTimeout)
     }
 
-    private class Idempotent(
-        val dispatcher: OpDispatcher,
-        val id: Long,
-        val request: Request,
-        val fingerprint: String,
-        val validate: suspend (PumpBackend) -> Unit
-    ) {
-
-        suspend infix fun run(action: suspend (PumpBackend) -> JsonObject): JsonObject = dispatcher.runIdempotent(this, action)
+    private fun lateResult(request: Request, value: Any?): JsonObject = when {
+        request is Request.DeliverBolus && value is BolusStarted -> Wire.bolusResult(value.bolusId, value.amount)
+        request is Request.SetTbr -> Wire.tbrResult(request.percent, request.duration)
+        request is Request.SetOperatingMode -> Wire.modeResult(request.started)
+        request is Request.SetBasalProfile -> Wire.profileResult((value as? Int) ?: 1)
+        else -> Wire.emptyResult()
     }
 
-    private fun idempotent(
+    private suspend fun idempotent(
         id: Long, request: Request, fingerprint: String,
-        validate: suspend (PumpBackend) -> Unit
-    ) = Idempotent(this, id, request, fingerprint, validate)
-
-    private suspend fun runIdempotent(ctx: Idempotent, action: suspend (PumpBackend) -> JsonObject): JsonObject {
-        val b = requireBackend()
-        val requestId = ctx.request.requestIdOrNull!!
-        // Validation that needs pump limits happens before anything is recorded, so a rejected
-        // request never consumes (or is replayed as) a requestId.
-        withTimeoutMapped(readTimeoutMillis, false) { ctx.validate(b) }
-
-        when (val begin = store.begin(requestId, ctx.request.op, ctx.fingerprint)) {
-            is IdempotencyStore.Begin.Replay -> return toResponse(ctx.id, begin.outcome)
+        validateWithBackend: suspend (PumpBackend) -> Unit,
+        action: suspend (PumpBackend) -> JsonObject
+    ): JsonObject {
+        val requestId = request.requestIdOrNull!!
+        // 1. Record first. Replay / mismatch / in-flight are answered from the journal without any backend access.
+        when (val begin = store.begin(requestId, request.op, fingerprint)) {
+            is IdempotencyStore.Begin.Replay -> return toResponse(id, begin.outcome)
             is IdempotencyStore.Begin.Mismatch ->
                 throw PumpOpException(ErrorCode.INVALID_ARGS, "requestId was already used for a different command")
-            is IdempotencyStore.Begin.InFlight -> return toResponse(ctx.id, begin.deferred.await())
+            is IdempotencyStore.Begin.InFlight -> return toResponse(id, begin.deferred.await())
             is IdempotencyStore.Begin.Proceed -> Unit
         }
 
-        val outcome = try {
-            dosingMutex.withLock {
-                val result = withTimeoutMapped(dosingTimeoutMillis, uncertainOnTimeout = true) { action(b) }
-                StoredOutcome(true, result, null, null, false)
+        var commandMayHaveReachedPump = false
+        val late: (Result<Any?>) -> Unit = { r ->
+            r.onSuccess { v -> store.amend(requestId, StoredOutcome(true, lateResult(request, v), null, null, false)) }
+        }
+        val outcome: StoredOutcome = try {
+            RequestValidator.validateStatic(request, Instant.ofEpochMilli(clock()), AlertCatalog.knownTypes)
+            val b = requireBackend()
+            // Validation may read limits (and open the link): it runs inside the same budget as the command.
+            val result = withBudget(dosingTimeoutMillis, uncertainOnTimeout = true, late = late) {
+                validateWithBackend(b)
+                dosingMutex.withLock {
+                    commandMayHaveReachedPump = true
+                    action(b)
+                }
             }
+            StoredOutcome(true, result, null, null, false)
         } catch (e: PumpOpException) {
-            StoredOutcome(false, null, e.code, e.message, e.uncertain)
+            // A rejection before the command started is certain, whatever the exception says.
+            StoredOutcome(false, null, e.code, e.message, e.uncertain && commandMayHaveReachedPump)
         } catch (e: CancellationException) {
-            // Leave the entry IN_FLIGHT: it becomes an uncertain outcome after a restart.
+            // The coroutine is being stopped (service stop / restart): never leave the entry in flight.
+            withContext(NonCancellable) {
+                store.complete(
+                    requestId,
+                    StoredOutcome(
+                        false, null, ErrorCode.INTERNAL,
+                        if (commandMayHaveReachedPump) "The bridge was stopped while the command was running; the pump may or may not have executed it"
+                        else "The bridge was stopped before the command was sent",
+                        uncertain = commandMayHaveReachedPump
+                    )
+                )
+            }
             throw e
         } catch (e: Exception) {
-            // Unknown failure after the command may have been sent: be conservative.
-            StoredOutcome(false, null, ErrorCode.INTERNAL, "Internal error: ${e.javaClass.simpleName}", true)
+            PumpLog.w("command failed unexpectedly: ${e.javaClass.simpleName}")
+            StoredOutcome(false, null, ErrorCode.INTERNAL, "Internal error: ${e.javaClass.simpleName}", uncertain = commandMayHaveReachedPump)
         }
         store.complete(requestId, outcome)
-        return toResponse(ctx.id, outcome)
+        return toResponse(id, outcome)
     }
 
     private fun toResponse(id: Long, o: StoredOutcome): JsonObject =
         if (o.ok) Wire.ok(id, o.result ?: Wire.emptyResult())
         else Wire.error(id, o.errorCode ?: ErrorCode.INTERNAL, o.message ?: "error", o.uncertain)
+
+    companion object {
+
+        /** The OpContext budget is the real limit; this outer timeout is only a backstop against a stuck backend. */
+        const val TIMEOUT_BACKSTOP_MS = 3_000L
+    }
 }

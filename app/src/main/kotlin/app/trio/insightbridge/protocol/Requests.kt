@@ -64,9 +64,30 @@ object RequestParser {
     fun idOf(obj: JsonObject): Long? {
         val el = obj["id"] as? JsonPrimitive ?: return null
         if (el.isString) return null
-        val bd = el.content.toBigDecimalOrNull() ?: return null
-        val l = runCatching { bd.toBigIntegerExact().takeIf { it.bitLength() <= 63 }?.toLong() }.getOrNull() ?: return null
+        val bd = boundedNumber(el.content) ?: return null
+        val l = integerOrNull(bd) ?: return null
         return if (l in 0..0xFFFF_FFFFL) l else null
+    }
+
+    /** Longest numeric literal accepted anywhere in a request. */
+    const val MAX_NUMBER_CHARS = 40
+
+    /**
+     * Parses a JSON number without ever allocating something huge: a literal like `1E999999999` would
+     * otherwise make `toBigIntegerExact()` / `toPlainString()` allocate gigabytes. Accepts at most
+     * [MAX_NUMBER_CHARS] characters, scale 0..8 and 6 integer digits for decimals.
+     */
+    fun boundedNumber(content: String): BigDecimal? {
+        if (content.length > MAX_NUMBER_CHARS) return null
+        val bd = content.toBigDecimalOrNull() ?: return null
+        val integerDigits = bd.precision() - bd.scale()
+        // integer part limited to 19 digits here; callers narrow further
+        return if (integerDigits <= 19 && bd.scale() >= -19) bd else null
+    }
+
+    private fun integerOrNull(bd: BigDecimal): Long? {
+        val exact = try { bd.toBigIntegerExact() } catch (e: ArithmeticException) { return null }
+        return if (exact.bitLength() <= 63) exact.toLong() else null
     }
 
     fun parseObject(bytes: ByteArray): JsonObject {
@@ -155,8 +176,11 @@ object RequestParser {
     private fun decimal(o: JsonObject, name: String): BigDecimal {
         val p = prim(o, name)
         if (p.isString) bad("$name must be a number")
-        // BigDecimal rejects NaN / Infinity literals; exponent forms are fine.
-        return p.content.toBigDecimalOrNull()?.takeIf { it.scale() < 18 && it.precision() < 40 } ?: bad("$name is not a valid number")
+        val bd = boundedNumber(p.content) ?: bad("$name is not a valid number")
+        // Insulin amounts and rates: plain decimals, at most 8 fractional and 6 integer digits. Exponent forms
+        // that expand beyond that (1E+9, 1E-30) are rejected here, so nothing downstream can blow up.
+        if (bd.scale() !in 0..8 || bd.precision() - bd.scale() > 6) bad("$name is out of range")
+        return bd
     }
 
     private fun int(o: JsonObject, name: String): Int {
@@ -168,15 +192,8 @@ object RequestParser {
     private fun longOf(el: JsonElement, name: String): Long {
         val p = el as? JsonPrimitive ?: bad("$name must be an integer")
         if (p.isString) bad("$name must be an integer")
-        val bd = p.content.toBigDecimalOrNull() ?: bad("$name must be an integer")
-        // BigInteger.longValueExact needs API 31; check the range by hand (minSdk 26).
-        val exact = try {
-            bd.toBigIntegerExact()
-        } catch (e: ArithmeticException) {
-            bad("$name must be an integer")
-        }
-        if (exact.bitLength() > 63) bad("$name out of range")
-        return exact.toLong()
+        val bd = boundedNumber(p.content) ?: bad("$name must be an integer")
+        return integerOrNull(bd) ?: bad("$name must be an integer in range")
     }
 
     private fun uuid(o: JsonObject): String {

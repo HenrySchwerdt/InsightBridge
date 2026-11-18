@@ -119,7 +119,17 @@ class BridgeCore(private val rt: BridgeRuntime) : GattServerManager.Listener {
         }
     }
 
+    @android.annotation.SuppressLint("MissingPermission") // guarded by Perms.bluetoothGranted below
     private suspend fun healthLoop(g: GattServerManager) {
+        // One-time hint if an earlier build renamed the system Bluetooth adapter (this build never does).
+        try {
+            val name = (rt.app.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter?.name
+            if (Perms.bluetoothGranted(rt.app) && name?.startsWith("InsightBridge-") == true && !rt.settings.getBoolean("btNameHintShown")) {
+                rt.settings.putBoolean("btNameHintShown", true)
+                rt.notifications.adapterRenamedHint()
+            }
+        } catch (_: Throwable) {
+        }
         if (rt.settings.crashPending) {
             rt.settings.crashPending = false
             rt.notifications.restartedAfterCrash()
@@ -189,9 +199,9 @@ class BridgeCore(private val rt: BridgeRuntime) : GattServerManager.Listener {
 
     // ---- GattServerManager.Listener ----
 
-    override fun onConnected(centralId: String) { engine?.onCentralConnected(centralId) }
-    override fun onDisconnected(centralId: String) { engine?.onCentralDisconnected(centralId) }
-    override fun onFragment(centralId: String, bytes: ByteArray) { engine?.onFragment(centralId, bytes) }
+    override fun onConnected(centralId: String, generation: Long) { engine?.onCentralConnected(centralId, generation) }
+    override fun onDisconnected(centralId: String, generation: Long) { engine?.onCentralDisconnected(centralId, generation) }
+    override fun onFragment(centralId: String, generation: Long, bytes: ByteArray) { engine?.onFragment(centralId, bytes, generation) }
 
     /** For the pairing UI. */
     fun disconnectPhone() { engine?.disconnectPhone() }

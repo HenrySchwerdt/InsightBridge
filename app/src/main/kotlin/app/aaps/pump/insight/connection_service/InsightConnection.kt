@@ -139,6 +139,7 @@ class InsightConnection(
     private var recoveryTimer: DelayedActionThread? = null
     private var timeoutTimer: DelayedActionThread? = null
     private var timerGeneration = 0L
+    private var connectGeneration = 0L
     private var bluetoothSocket: BluetoothSocket? = null
     private var bluetoothDevice: BluetoothDevice? = null
     private var connectionEstablisher: ConnectionEstablisher? = null
@@ -304,6 +305,12 @@ class InsightConnection(
             connectionAttempts = 0
             timeoutDuringHandshakeCounter = 0
             connect()
+        } else if (state === InsightState.RECOVERING && pairingDataStorage.paired) {
+            // Somebody wants the pump NOW (a command): do not make them wait out the backoff timer.
+            recoveryTimer?.interrupt()
+            recoveryTimer = null
+            timerGeneration++
+            connect()
         }
     }
 
@@ -354,6 +361,7 @@ class InsightConnection(
         }
         connectionEstablisher = null
         timerGeneration++
+        connectGeneration++
         timeoutTimer?.interrupt()
         timeoutTimer = null
         buffer.clear()
@@ -474,8 +482,25 @@ class InsightConnection(
         if (connectionAttempts == 0) connectionSeriesStart = System.currentTimeMillis()
         connectionAttempts++
         setState(InsightState.CONNECTING)
+        armConnectTimeout()
         bluetoothDevice?.let { device ->
             connectionEstablisher = ConnectionEstablisher(this, !pairingDataStorage.paired, adapter, device, bluetoothSocket).also { it.start() }
+        }
+    }
+
+    /**
+     * A socket connect() can hang far longer than anybody is willing to wait (and cannot be interrupted except by
+     * closing the socket). Give up after [CONNECT_TIMEOUT_MS]: cleanup closes the socket and the normal backoff
+     * ([handleException] -> RECOVERING) takes over.
+     */
+    private fun armConnectTimeout() {
+        val generation = ++connectGeneration
+        runDelayed("ConnectTimeout", CONNECT_TIMEOUT_MS) {
+            synchronized(this@InsightConnection) {
+                if (generation == connectGeneration && state === InsightState.CONNECTING) {
+                    handleException(ConnectionFailedException(CONNECT_TIMEOUT_MS, IOException("connect timed out")))
+                }
+            }
         }
     }
 
@@ -484,6 +509,7 @@ class InsightConnection(
     }
 
     @Synchronized override fun onConnectionSucceed() {
+        connectGeneration++
         try {
             PumpLog.i("Connected after $connectionAttempts attempt(s) in ${System.currentTimeMillis() - connectionSeriesStart} ms")
             connectionAttempts = 0
@@ -838,6 +864,7 @@ class InsightConnection(
         private const val BUFFER_SIZE = 4096
         private const val TIMEOUT_DURING_HANDSHAKE_NOTIFICATION_THRESHOLD = 3
         private const val RESPONSE_TIMEOUT: Long = 6000
+        const val CONNECT_TIMEOUT_MS = 30_000L
         private const val WAKE_LOCK_TIMEOUT_MS = 30_000L
     }
 }

@@ -82,6 +82,10 @@ class BridgeRuntime(val app: Application) {
 
     init {
         PumpLog.sink = log
+        // The simulator is never resumed by itself after a restart: it has to be switched on (and confirmed) again.
+        if (settings.clearStaleSimulatorFlag()) {
+            PumpLog.w("Simulator was on before the restart; switched off, it needs to be enabled again")
+        }
         log.persistent = { crashLog.append(it) }
     }
 

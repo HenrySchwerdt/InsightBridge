@@ -326,7 +326,7 @@ class SimulatedPump(
         progress.forEach { _events.tryEmit(BackendEvent.BolusProgress(it)) }
     }
 
-    override suspend fun deliverBolus(amount: BigDecimal): Int = dosing("deliverBolus") {
+    override suspend fun deliverBolus(amount: BigDecimal): BolusStarted = dosing("deliverBolus") {
         if (!started) throw PumpOpException(ErrorCode.PUMP_SUSPENDED, "Pump is not running")
         if (boluses.values.any { !it.done }) throw PumpOpException(ErrorCode.PUMP_BUSY, "A bolus is already running")
         val units = amount.toDouble()
@@ -339,7 +339,7 @@ class SimulatedPump(
             put("bolusId", id); put("bolusType", "standard"); put("amount", units)
         })
         emitStatusLocked()
-        id
+        BolusStarted(id, amount)
     }
 
     override suspend fun cancelBolus(bolusId: Int): Double? = synchronized(lock) {

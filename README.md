@@ -99,8 +99,24 @@ GEN_VECTORS=1 ./gradlew testDebugUnitTest --tests '*TestVectorsTest*'
 - Health visibility on the main screen and in the persistent notification; warnings for missing
   battery exemption, disabled notifications, Bluetooth off; a notification if the pump was not
   reachable for more than 15 minutes or after a restart following a crash.
-- Pump link policy: by default the link is opened on demand and for a periodic refresh (saves pump
-  battery, like AndroidAPS); the main screen has a switch to keep the pump connected all the time.
+- Pump link policy: by default the link is opened on demand and for a periodic refresh every 5 minutes
+  (saves pump battery, like AndroidAPS); the main screen has a switch to keep the pump connected all the
+  time. In on-demand mode pump alerts are therefore noticed at most 5 minutes late (the pump itself alarms
+  audibly at once); polling every minute would mean a Bluetooth connect per minute and noticeably shorter
+  pump battery life. In keep-connected mode alerts are polled every 5 seconds.
+
+## Behaviour notes
+
+- **Bolus resolution.** The Insight's step grows with the amount (AndroidAPS `DoseStepSize.InsightBolus`):
+  0.05 U up to 2 U, 0.1 U up to 5 U, 0.2 U below 10 U, 0.5 U from 10 U. Amounts that are not on the grid are
+  rejected (never rounded). `status.limits.bolusStep` reports the finest step (0.05, valid for small amounts).
+  `deliverBolus` answers with the amount the pump reports as programmed.
+- **Advertising.** The bridge advertises the service UUID (the iPhone scans by UUID); the last 4 hex digits of the
+  bridge id travel as service data in the scan response. The phone's system Bluetooth name is not changed any more
+  (an earlier build renamed it; a one-time notification hints how to set the name back).
+- **Simulator** is never resumed after an app restart: it has to be switched on and confirmed again.
+- **Journal and keys.** The idempotency journal keeps 5000 requestIds for 24 h. Unreadable storage refuses
+  dosing and is never overwritten; corrupt files are moved to `<name>.bak`.
 
 ## Security notes
 

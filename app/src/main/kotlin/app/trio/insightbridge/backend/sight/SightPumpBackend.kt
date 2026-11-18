@@ -61,6 +61,9 @@ import app.trio.insightbridge.backend.BackendEvent
 import app.trio.insightbridge.backend.BackendKind
 import app.trio.insightbridge.backend.PumpBackend
 import app.trio.insightbridge.engine.PumpLimits
+import app.trio.insightbridge.engine.currentOpContext
+import app.trio.insightbridge.engine.opRemainingMs
+import app.trio.insightbridge.backend.BolusStarted
 import app.trio.insightbridge.protocol.ActiveBolusDto
 import app.trio.insightbridge.protocol.AlertDto
 import app.trio.insightbridge.protocol.BasalDto
@@ -102,7 +105,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeout
+import app.aaps.pump.insight.exceptions.TimeoutException as PumpTimeoutException
 
 /** How the pump link is held between commands. */
 enum class LinkMode {
@@ -136,6 +141,7 @@ class SightPumpBackend(
     companion object {
 
         const val CONNECT_TIMEOUT_MS = 25_000L
+        const val OP_CONNECT_MS = 15_000L
         const val REQUEST_TIMEOUT_MS = 20_000L
         const val DOSING_TIMEOUT_MS = 30_000L
         const val ALERT_POLL_MS = 5_000L
@@ -177,6 +183,8 @@ class SightPumpBackend(
         var cartridge: CartridgeStatus? = null
         var activeBasalRate: ActiveBasalRate? = null
         var activeTbr: ActiveTBR? = null
+        var tbrReadAt = 0L
+        var bolusesReadAt = 0L
         var activeBoluses: List<ActiveBolus>? = null
         var activeProfile: BasalProfile? = null
         var profile1: List<BasalProfileBlock>? = null
@@ -246,14 +254,20 @@ class SightPumpBackend(
         }
     }
 
-    /** Runs [block] with the pump link held and CONNECTED; releases the lease afterwards. */
+    /**
+     * Runs [block] with the pump link held and CONNECTED; releases the lease afterwards. Inside an operation
+     * (see [app.trio.insightbridge.engine.OpContext]) the connect timeout is at most half of what is left of the
+     * dispatcher's budget, so connect + mode check + command always fit in the time the phone waits.
+     */
     private suspend fun <T> withLink(connectTimeoutMs: Long = CONNECT_TIMEOUT_MS, block: suspend () -> T): T {
         if (!connection.isPaired) throw PumpOpException(ErrorCode.NOT_PAIRED, "The bridge has no pump pairing")
+        val remaining = opRemainingMs(Long.MAX_VALUE)
+        val connectTimeout = if (remaining == Long.MAX_VALUE) connectTimeoutMs else minOf(OP_CONNECT_MS, remaining / 2).coerceAtLeast(1_000)
         val lease = Any()
         connection.requestConnection(lease)
         try {
             try {
-                withTimeout(connectTimeoutMs) { connection.stateFlow.first { it === InsightState.CONNECTED } }
+                withTimeout(connectTimeout) { connection.stateFlow.first { it === InsightState.CONNECTED } }
             } catch (e: TimeoutCancellationException) {
                 throw PumpOpException(ErrorCode.PUMP_UNREACHABLE, "Could not connect to the pump")
             }
@@ -263,24 +277,40 @@ class SightPumpBackend(
         }
     }
 
-    /** Awaits a request off the main threads, mapping failures. [mayHaveEffect] = command that changes pump state. */
+    /** Timeout for one pump request: its own limit, but never beyond what is left of the operation budget. */
+    private suspend fun budgeted(timeoutMs: Long): Long = minOf(timeoutMs, (opRemainingMs(timeoutMs) - 300).coerceAtLeast(500))
+
+    /**
+     * Sends a request and waits for the reply. [mayHaveEffect] = the command changes pump state. If such a
+     * command was transmitted and the wait times out, the real reply may still arrive: [lateValue] turns it
+     * into the value reported to the dispatcher (via the operation context) so the journal can be corrected.
+     */
     private suspend fun <T : AppLayerMessage> await(
-        message: T, mayHaveEffect: Boolean, timeoutMs: Long = if (mayHaveEffect) DOSING_TIMEOUT_MS else REQUEST_TIMEOUT_MS
+        message: T, mayHaveEffect: Boolean, timeoutMs: Long = if (mayHaveEffect) DOSING_TIMEOUT_MS else REQUEST_TIMEOUT_MS,
+        lateValue: ((T) -> Any?)? = null
     ): T {
         val request = connection.requestMessage(message)
-        return awaitRequest(request, mayHaveEffect, timeoutMs)
+        return awaitRequest(request, mayHaveEffect, budgeted(timeoutMs), lateValue)
     }
 
-    private suspend fun <T : AppLayerMessage> awaitRequest(request: MessageRequest<T>, mayHaveEffect: Boolean, timeoutMs: Long): T =
-        withContext(Dispatchers.IO) {
-            try {
-                request.await(timeoutMs)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                throw SightMapping.mapFailure(e, request.transmitted, mayHaveEffect)
+    private suspend fun <T : AppLayerMessage> awaitRequest(
+        request: MessageRequest<T>, mayHaveEffect: Boolean, timeoutMs: Long, lateValue: ((T) -> Any?)? = null
+    ): T {
+        val ctx = currentOpContext()
+        return try {
+            // runInterruptible: cancelling the operation interrupts the blocking wait instead of waiting it out.
+            runInterruptible(Dispatchers.IO) { request.await(timeoutMs) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (e is PumpTimeoutException && mayHaveEffect && request.transmitted && ctx != null && lateValue != null) {
+                request.onCompleted { response, _ ->
+                    if (response != null) scope.launch { ctx.late(Result.success(lateValue(response))) }
+                }
             }
+            throw SightMapping.mapFailure(e, request.transmitted, mayHaveEffect)
         }
+    }
 
     private suspend fun <T> readBlock(block: suspend () -> T): T = try {
         block()
@@ -317,10 +347,7 @@ class SightPumpBackend(
             )
         }
         val s = snap
-        val tbr = s.activeTbr?.let {
-            val elapsed = (it.initialDuration - it.remainingDuration).coerceAtLeast(0)
-            TbrDto(it.percentage, it.initialDuration, it.remainingDuration, SightMapping.iso(now.minus(elapsed.toLong(), ChronoUnit.MINUTES)))
-        }
+        val tbr = s.activeTbr?.let { SightMapping.tbrView(it, s.tbrReadAt, clock()) }
         val limits = s.limits
         StatusDto(
             timestamp = if (s.readAt == 0L) null else SightMapping.iso(Instant.ofEpochMilli(s.readAt)),
@@ -381,7 +408,10 @@ class SightPumpBackend(
                 if (reg.isOperatingModeChanged) updateMode()
                 if (reg.isBatteryStatusChanged) updateBattery()
                 if (reg.isCartridgeStatusChanged) updateCartridge()
-                readRunningState(reg.isActiveBasalRateChanged, reg.isActiveTBRChanged, reg.isActiveBolusesChanged)
+                // A running TBR / bolus is re-read every time: the register only flags changes, not progress.
+                val tbrRunning = synchronized(stateLock) { snap.activeTbr != null }
+                val bolusRunning = synchronized(stateLock) { !snap.activeBoluses.isNullOrEmpty() }
+                readRunningState(reg.isActiveBasalRateChanged, reg.isActiveTBRChanged || tbrRunning, reg.isActiveBolusesChanged || bolusRunning)
             } else {
                 await(
                     ResetPumpStatusRegisterMessage(
@@ -426,8 +456,8 @@ class SightPumpBackend(
             return
         }
         if (basal) await(GetActiveBasalRateMessage(), false).activeBasalRate.let { synchronized(stateLock) { snap.activeBasalRate = it } }
-        if (tbr) await(GetActiveTBRMessage(), false).activeTBR.let { synchronized(stateLock) { snap.activeTbr = it } }
-        if (boluses) await(GetActiveBolusesMessage(), false).activeBoluses.let { synchronized(stateLock) { snap.activeBoluses = it?.toList() } }
+        if (tbr) await(GetActiveTBRMessage(), false).activeTBR.let { synchronized(stateLock) { snap.activeTbr = it; snap.tbrReadAt = clock() } }
+        if (boluses) await(GetActiveBolusesMessage(), false).activeBoluses.let { synchronized(stateLock) { snap.activeBoluses = it?.toList(); snap.bolusesReadAt = clock() } }
     }
 
     private suspend fun updateClock() {
@@ -561,7 +591,7 @@ class SightPumpBackend(
         }
     }
 
-    override suspend fun deliverBolus(amount: BigDecimal): Int = withLink {
+    override suspend fun deliverBolus(amount: BigDecimal): BolusStarted = withLink {
         requireStarted()
         val message = DeliverBolusMessage().apply {
             bolusType = app.aaps.pump.insight.descriptors.BolusType.STANDARD
@@ -570,10 +600,22 @@ class SightPumpBackend(
             immediateAmount = amount.toDouble()
             disableVibration = false
         }
-        val bolusId = await(message, mayHaveEffect = true).bolusId
+        val bolusId = await(message, mayHaveEffect = true, lateValue = { m ->
+            // The reply came after the dispatcher gave up: still track the bolus, and report the real outcome.
+            synchronized(stateLock) { programmed[m.bolusId] = amount.toDouble() }
+            startBolusMonitor(m.bolusId, amount.toDouble())
+            BolusStarted(m.bolusId, amount)
+        }).bolusId
         synchronized(stateLock) { programmed[bolusId] = amount.toDouble() }
-        startBolusMonitor(bolusId, amount.toDouble())
-        bolusId
+        // Report what the pump says it programmed (best effort; falls back to the requested amount).
+        val programmedAmount = try {
+            await(GetActiveBolusesMessage(), false).activeBoluses?.firstOrNull { it.bolusID == bolusId }
+                ?.initialAmount?.let { bd(it) }
+        } catch (e: PumpOpException) {
+            null
+        } ?: amount
+        startBolusMonitor(bolusId, programmedAmount.toDouble())
+        BolusStarted(bolusId, programmedAmount)
     }
 
     /** Keeps a link lease and polls the pump until the bolus is finished, emitting progress events. */
@@ -681,14 +723,19 @@ class SightPumpBackend(
         val profile = BRProfile1Block().also { it.profileBlocks = blocks.toMutableList() }
         val active = ActiveBRProfileBlock().also { it.activeBasalProfile = BasalProfile.PROFILE_1 }
         val session = ParameterBlockUtil.requestConfigurationBlocks(connection, profile, active)
+        var sessionError: Exception? = null
         try {
-            withContext(Dispatchers.IO) { session.await(DOSING_TIMEOUT_MS) }
+            val t = budgeted(DOSING_TIMEOUT_MS)
+            runInterruptible(Dispatchers.IO) { session.await(t) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            throw SightMapping.mapFailure(e, session.transmitted, true)
+            sessionError = e
         }
-        // Read back and compare; any difference is verifyFailed.
+        // Nothing was sent: certain failure.
+        if (sessionError != null && !session.transmitted) throw SightMapping.mapFailure(sessionError, false, true)
+        // Something was sent (even if the session reported an error: the pump may have applied part or all of it,
+        // e.g. the close message is sent after a refused write): ONLY the read-back tells the truth.
         val readBack = try {
             readBlock {
                 val p = ParameterBlockUtil.readParameterBlock(connection, Service.CONFIGURATION, BRProfile1Block::class.java)?.profileBlocks
@@ -696,10 +743,18 @@ class SightPumpBackend(
                 p to a
             }
         } catch (e: PumpOpException) {
-            throw PumpOpException(ErrorCode.PUMP_UNREACHABLE, "Could not read the profile back to verify it", uncertain = true, cause = e)
+            null
         }
-        if (readBack.second != BasalProfile.PROFILE_1 || !profilesEqual(segments, readBack.first)) {
-            throw PumpOpException(ErrorCode.VERIFY_FAILED, "The profile read back from the pump differs from the one written")
+        val matches = readBack != null && readBack.second == BasalProfile.PROFILE_1 && profilesEqual(segments, readBack.first)
+        when (SightMapping.profileVerdict(sessionError != null, session.transmitted, readBack != null, matches)) {
+            SightMapping.ProfileVerdict.UNCERTAIN ->
+                throw PumpOpException(ErrorCode.PUMP_UNREACHABLE, "Could not read the profile back to verify it", uncertain = true)
+            SightMapping.ProfileVerdict.VERIFY_FAILED -> throw PumpOpException(
+                ErrorCode.VERIFY_FAILED,
+                if (sessionError != null) "The profile write failed and the pump does not hold the requested profile"
+                else "The profile read back from the pump differs from the one written"
+            )
+            else -> Unit
         }
         synchronized(stateLock) { snap.activeProfile = BasalProfile.PROFILE_1 }
         afterChange()

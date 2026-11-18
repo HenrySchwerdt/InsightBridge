@@ -108,6 +108,25 @@ class WireJsonTest {
         invalid("nope", "{}")
     }
 
+    @Test fun hugeExponentsAndOversizedNumbersAreRejectedWithoutAllocating() {
+        val t0 = System.nanoTime()
+        invalid("deliverBolus", """{"amount":1E999999999,"requestId":"$uuid"}""")
+        invalid("deliverBolus", """{"amount":1E-999999999,"requestId":"$uuid"}""")
+        invalid("deliverBolus", """{"amount":1E+3,"requestId":"$uuid"}""")                // negative scale
+        invalid("deliverBolus", """{"amount":0.000000001,"requestId":"$uuid"}""")         // scale 9
+        invalid("deliverBolus", """{"amount":1234567.5,"requestId":"$uuid"}""")           // 7 integer digits
+        invalid("deliverBolus", """{"amount":${"1".repeat(41)},"requestId":"$uuid"}""")   // too long
+        invalid("cancelBolus", """{"bolusId":1E999999999}""")
+        invalid("setTBR", """{"percent":1E999999999,"duration":30,"requestId":"$uuid"}""")
+        invalid("readHistory", """{"sinceSequence":1E999999999,"max":10}""")
+        invalid("setBasalProfile", """{"segments":[{"duration":1E999999999,"rate":1}],"requestId":"$uuid"}""")
+        assertThat(RequestParser.idOf(RequestParser.parseObject("""{"id":1E999999999}""".toByteArray()))).isNull()
+        assertThat((System.nanoTime() - t0) / 1_000_000).isLessThan(2_000)
+        // ordinary exponent forms that stay small still work
+        assertThat((parse("deliverBolus", """{"amount":1E-1,"requestId":"$uuid"}""") as Request.DeliverBolus).amount.compareTo(BigDecimal("0.1"))).isEqualTo(0)
+        assertThat(parse("cancelBolus", """{"bolusId":1E+1}""")).isEqualTo(Request.CancelBolus(10))
+    }
+
     @Test fun nonObjectFramesAreUnparseable() {
         assertThrows<UnparseableFrame> { RequestParser.parseObject("[]".toByteArray()) }
         assertThrows<UnparseableFrame> { RequestParser.parseObject("not json".toByteArray()) }

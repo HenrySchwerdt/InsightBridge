@@ -21,7 +21,24 @@ import app.aaps.pump.insight.utils.waitMillis
 open class MessageRequest<T : AppLayerMessage> internal constructor(var request: T) : Comparable<MessageRequest<*>> {
 
     var response: T? = null
+        set(value) { field = value; fireCompleted() }
     var exception: Exception? = null
+        set(value) { field = value; fireCompleted() }
+
+    private var completionListener: ((T?, Exception?) -> Unit)? = null
+
+    private fun fireCompleted() {
+        val l = synchronized(this) { val c = completionListener; if (response != null || exception != null) completionListener = null; c }
+        if (l != null && (response != null || exception != null)) l(response, exception)
+    }
+
+    /** Calls [listener] once when the request completes (immediately if it already has). Must be quick and non-blocking. */
+    fun onCompleted(listener: (T?, Exception?) -> Unit) {
+        val done = synchronized(this) {
+            if (response != null || exception != null) true else { completionListener = listener; false }
+        }
+        if (done) listener(response, exception)
+    }
 
     /**
      * True once the message was handed to the Bluetooth writer. If a request fails with a link

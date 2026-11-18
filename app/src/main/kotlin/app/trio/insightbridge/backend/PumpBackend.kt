@@ -17,6 +17,9 @@ import java.time.Instant
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
+/** Result of an accepted bolus: the id and the programmed amount as reported by the pump. */
+data class BolusStarted(val bolusId: Int, val amount: BigDecimal)
+
 enum class BackendKind { SIGHT, SIMULATED, NONE }
 
 /** Unsolicited things a backend reports; the engine turns them into protocol events. */
@@ -55,7 +58,8 @@ interface PumpBackend {
 
     fun cachedStatus(): StatusDto?
 
-    suspend fun deliverBolus(amount: BigDecimal): Int
+    /** Starts a bolus; returns as soon as the pump accepted it. The returned amount is what the pump reports as programmed. */
+    suspend fun deliverBolus(amount: BigDecimal): BolusStarted
     suspend fun cancelBolus(bolusId: Int): Double?
     suspend fun setTbr(percent: Int, duration: Int)
     suspend fun cancelTbr()

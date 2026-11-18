@@ -42,6 +42,7 @@ object Troubles {
         PumpPairFailure.CONNECTION_FAILED -> pumpFull
         PumpPairFailure.BLUETOOTH_UNAVAILABLE -> btOff
         PumpPairFailure.OTHER -> pumpFull
+        PumpPairFailure.SIMULATOR_ACTIVE -> pumpFull
     }
 
     fun failureTitleRes(f: PumpPairFailure): Int = when (f) {
@@ -50,6 +51,7 @@ object Troubles {
         PumpPairFailure.CONNECTION_FAILED -> R.string.pump_fail_conn_title
         PumpPairFailure.BLUETOOTH_UNAVAILABLE -> R.string.pump_fail_bt_title
         PumpPairFailure.OTHER -> R.string.pump_fail_other_title
+        PumpPairFailure.SIMULATOR_ACTIVE -> R.string.pump_fail_sim_title
     }
 
     fun failureBodyRes(f: PumpPairFailure): Int = when (f) {
@@ -58,5 +60,6 @@ object Troubles {
         PumpPairFailure.CONNECTION_FAILED -> R.string.pump_fail_conn_body
         PumpPairFailure.BLUETOOTH_UNAVAILABLE -> R.string.pump_fail_bt_body
         PumpPairFailure.OTHER -> R.string.pump_fail_other_body
+        PumpPairFailure.SIMULATOR_ACTIVE -> R.string.pump_fail_sim_body
     }
 }

@@ -66,6 +66,34 @@ object SightMapping {
         else -> "standard"
     }
 
+    /**
+     * TBR as seen NOW from a snapshot read at [readAtMs]: the remaining time shrinks with the elapsed time
+     * (the TBR itself is deterministic), the start stays fixed, and an expired TBR is gone (null).
+     */
+    fun tbrView(tbr: app.aaps.pump.insight.descriptors.ActiveTBR, readAtMs: Long, nowMs: Long): app.trio.insightbridge.protocol.TbrDto? {
+        val elapsedMs = (nowMs - readAtMs).coerceAtLeast(0)
+        val remainingMin = tbr.remainingDuration - (elapsedMs / 60_000).toInt()
+        if (remainingMin <= 0) return null
+        val ranMin = (tbr.initialDuration - tbr.remainingDuration).coerceAtLeast(0)
+        val start = Instant.ofEpochMilli(readAtMs).minus(ranMin.toLong(), ChronoUnit.MINUTES)
+        return app.trio.insightbridge.protocol.TbrDto(tbr.percentage, tbr.initialDuration, remainingMin, iso(start))
+    }
+
+    enum class ProfileVerdict { NOT_SENT, SUCCESS, VERIFY_FAILED, UNCERTAIN }
+
+    /**
+     * Outcome of a basal profile write session. If nothing was transmitted the pump is untouched. Otherwise ONLY
+     * the read-back counts, even when the session itself reported an error (the close message is still sent
+     * after a refused write, so part or all of the profile may have been applied):
+     * read-back unavailable -> uncertain; equal to the request -> success; different -> verifyFailed.
+     */
+    fun profileVerdict(sessionFailed: Boolean, transmitted: Boolean, readBackAvailable: Boolean, readBackMatches: Boolean): ProfileVerdict = when {
+        sessionFailed && !transmitted -> ProfileVerdict.NOT_SENT
+        !readBackAvailable -> ProfileVerdict.UNCERTAIN
+        readBackMatches -> ProfileVerdict.SUCCESS
+        else -> ProfileVerdict.VERIFY_FAILED
+    }
+
     fun alertDto(a: Alert): AlertDto? {
         val type = a.alertType ?: return null
         val category = when (a.alertCategory) {

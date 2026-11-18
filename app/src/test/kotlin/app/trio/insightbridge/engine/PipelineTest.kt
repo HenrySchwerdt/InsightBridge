@@ -154,9 +154,16 @@ class PipelineTest {
         val commit = app.trio.insightbridge.protocol.PairingCrypto.commitment(kp.publicKey, ByteArray(16))
         c.sendHandshake(app.trio.insightbridge.protocol.HandshakeCodec.pairStart(commit))
         assertThat(c.takeHandshake()!!["t"]!!.jsonPrimitive.content).isEqualTo("pairResp")
+        // while the first phone is mid-pairing a second central is told "busy" (and does not disturb it)
         val c2 = rig.central("BB:11")
         c2.sendHandshake(app.trio.insightbridge.protocol.HandshakeCodec.pairStart(commit))
-        assertThat(c2.takeHandshake()!!["reason"]!!.jsonPrimitive.content).isEqualTo("notInPairingMode")
+        assertThat(c2.takeHandshake()!!["code"]!!.jsonPrimitive.content).isEqualTo("busy")
+        assertThat(c.isDisconnected()).isFalse()
+        // after the first one is gone, a new attempt in the same window is still refused
+        rig.engine.onCentralDisconnected("AA:00")
+        val c3 = rig.central("CC:33")
+        c3.sendHandshake(app.trio.insightbridge.protocol.HandshakeCodec.pairStart(commit))
+        assertThat(c3.takeHandshake()!!["reason"]!!.jsonPrimitive.content).isEqualTo("notInPairingMode")
     }
 
     @Test fun pairingWithProtocolVersion1IsRejected() = runTest {
@@ -398,8 +405,10 @@ class PipelineTest {
         val s = rig.sim.cachedStatus()!!
         assertThat(s.boluses).isEmpty(); assertThat(s.tbr).isNull()
         assertThat(rig.sim.reservoirUnits()).isWithin(0.01).of(200.0)
-        // and nothing was recorded: the same requestId can still be used for a valid command
-        assertThat(c.ok(c.request("deliverBolus", """{"amount":0.5,"requestId":"$u1"}"""))).isTrue()
+        // a rejection is the (certain) outcome of its requestId; a new intent uses a new requestId
+        val outcome = c.result(c.request("getRequestOutcome", """{"requestId":"$u1"}"""))
+        assertThat(outcome["state"]!!.jsonPrimitive.content).isEqualTo("failed")
+        assertThat(c.ok(c.request("deliverBolus", """{"amount":0.5,"requestId":"$u2"}"""))).isTrue()
     }
 
     @Test fun bolusRespondsWhenStartedAndProgressEventsFollow() = runTest {

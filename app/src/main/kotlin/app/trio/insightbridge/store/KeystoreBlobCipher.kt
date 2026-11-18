@@ -40,7 +40,12 @@ class KeystoreBlobCipher(private val alias: String = "insightbridge_master_v1") 
 
     override fun decrypt(data: ByteArray): ByteArray {
         val c = Cipher.getInstance("AES/GCM/NoPadding")
+        if (data.size <= 12 + 16) throw CorruptBlobException("blob too short")
         c.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, data, 0, 12))
-        return c.doFinal(data, 12, data.size - 12)
+        try {
+            return c.doFinal(data, 12, data.size - 12)
+        } catch (e: javax.crypto.AEADBadTagException) {
+            throw CorruptBlobException("authentication failed", e)
+        }
     }
 }

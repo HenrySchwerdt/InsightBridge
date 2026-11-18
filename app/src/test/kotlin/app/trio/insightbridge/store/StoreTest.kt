@@ -75,7 +75,7 @@ class StoreTest {
         assertThat(loaded.paired).isTrue()
         assertThat(loaded.macAddress).isEqualTo("AA:BB")
         assertThat(loaded.incomingKey).isEqualTo(ByteArray(16) { 1 })
-        assertThat(loaded.lastNonceSent!!.storageValue).isEqualTo(n.storageValue)
+        assertThat(java.math.BigInteger(loaded.lastNonceSent!!.storageValue)).isAtLeast(java.math.BigInteger(n.storageValue)) // reservation: never behind what was sent
         loaded.reset()
         val cleared = PairingDataStorage(kv)
         assertThat(cleared.paired).isFalse(); assertThat(cleared.incomingKey).isNull(); assertThat(cleared.lastNonceSent).isNull()

@@ -35,6 +35,7 @@ class Notifications(private val context: Context) {
         const val ID_RESTARTED = 4
         const val ID_PERMISSIONS = 5
         const val ID_NOT_RUNNING = 6
+        const val ID_NAME_HINT = 7
     }
 
     private val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -152,5 +153,6 @@ class Notifications(private val context: Context) {
     fun clearPumpUnreachable() = try { nm.cancel(ID_PUMP_UNREACHABLE) } catch (_: Throwable) {}
     fun restartedAfterCrash() = health(ID_RESTARTED, R.string.notif_restarted_title, R.string.notif_restarted_text)
     fun permissionsMissing() = health(ID_PERMISSIONS, R.string.notif_permissions_title, R.string.notif_permissions_text)
+    fun adapterRenamedHint() = health(ID_NAME_HINT, R.string.notif_name_hint_title, R.string.notif_name_hint_text)
     fun notRunning() = health(ID_NOT_RUNNING, R.string.notif_not_running_title, R.string.notif_not_running_text)
 }

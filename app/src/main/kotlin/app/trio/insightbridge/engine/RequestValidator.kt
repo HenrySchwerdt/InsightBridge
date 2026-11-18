@@ -40,11 +40,28 @@ object RequestValidator {
     fun isMultiple(value: BigDecimal, step: BigDecimal): Boolean =
         step.signum() > 0 && value.remainder(step).signum() == 0
 
+    /**
+     * The Insight's bolus resolution grows with the amount (AndroidAPS `DoseStepSize.InsightBolus`):
+     * up to 2 U in 0.05 U, above 2 U up to 5 U in 0.1 U, above 5 U below 10 U in 0.2 U, from 10 U in 0.5 U.
+     * [baseStep] is the pump's finest step (`limits.bolusStep`, 0.05); it is what the status reports, i.e.
+     * the step valid for small amounts. A pump that reports a coarser base step wins.
+     */
+    fun bolusStepFor(amount: BigDecimal, baseStep: BigDecimal): BigDecimal {
+        val grid = when {
+            amount <= BigDecimal(2) -> BigDecimal("0.05")
+            amount <= BigDecimal(5) -> BigDecimal("0.1")
+            amount < BigDecimal(10) -> BigDecimal("0.2")
+            else -> BigDecimal("0.5")
+        }
+        return grid.max(baseStep)
+    }
+
     fun validateBolus(amount: BigDecimal, limits: PumpLimits) {
         if (amount.signum() <= 0) bad("amount must be greater than 0")
         val cap = limits.maxBolus.min(ABSOLUTE_MAX_BOLUS)
         if (amount > cap) bad("amount exceeds the maximum bolus of ${cap.toPlainString()} U")
-        if (!isMultiple(amount, limits.bolusStep)) bad("amount must be a multiple of ${limits.bolusStep.toPlainString()} U")
+        val step = bolusStepFor(amount, limits.bolusStep)
+        if (!isMultiple(amount, step)) bad("amount must be a multiple of ${step.toPlainString()} U at this size")
     }
 
     fun validateTbr(percent: Int, duration: Int) {

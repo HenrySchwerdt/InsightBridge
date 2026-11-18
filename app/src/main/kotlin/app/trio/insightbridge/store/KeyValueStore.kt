@@ -42,6 +42,9 @@ class MemoryKeyValueStore : KeyValueStore {
     }
 }
 
+/** The blob is damaged or fails authentication (permanent, as opposed to a transient Keystore / I/O error). */
+class CorruptBlobException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
 /** Encrypts/decrypts whole blobs. Production: Android Keystore AES-GCM key ([KeystoreBlobCipher]). */
 interface BlobCipher {
 
@@ -60,20 +63,26 @@ class AesGcmBlobCipher(private val key: ByteArray, private val random: SecureRan
     }
 
     override fun decrypt(data: ByteArray): ByteArray {
-        require(data.size > 12 + 16)
+        if (data.size <= 12 + 16) throw CorruptBlobException("blob too short")
         val c = Cipher.getInstance("AES/GCM/NoPadding")
         c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, data, 0, 12))
-        return c.doFinal(data, 12, data.size - 12)
+        try {
+            return c.doFinal(data, 12, data.size - 12)
+        } catch (e: javax.crypto.AEADBadTagException) {
+            throw CorruptBlobException("authentication failed", e)
+        } catch (e: javax.crypto.BadPaddingException) {
+            throw CorruptBlobException("authentication failed", e)
+        }
     }
 }
 
 /** Atomic file write: temp file + fsync + rename. Plain (non-secret) content. */
 class AtomicTextFile(private val file: File) : TextFile {
 
-    override fun read(): String? = try {
-        if (file.exists()) file.readText(Charsets.UTF_8) else null
-    } catch (e: Exception) {
-        null
+    /** Null only if the file does not exist; an existing but unreadable file throws (it must not look "empty"). */
+    override fun read(): String? {
+        if (!file.exists()) return null
+        return file.readText(Charsets.UTF_8)
     }
 
     override fun write(text: String) {
@@ -88,33 +97,88 @@ class AtomicTextFile(private val file: File) : TextFile {
             if (!tmp.renameTo(file)) throw java.io.IOException("rename failed")
         }
     }
+
+    override fun quarantine() = quarantineFile(file)
+}
+
+/** Moves [file] to `<name>.bak` (replacing an older backup) so a corrupt file is kept for diagnosis and never overwritten. */
+fun quarantineFile(file: File) {
+    if (!file.exists()) return
+    val bak = File(file.parentFile, file.name + ".bak")
+    bak.delete()
+    if (!file.renameTo(bak)) throw java.io.IOException("could not move ${file.name} aside")
 }
 
 /**
- * Key/value store persisted as one encrypted blob (atomic). Secrets (pump pairing keys, LTK) go
- * here. A file that cannot be decrypted (e.g. Keystore key lost after a restore) is treated as
- * empty: the user must re-pair, nothing wrong is ever used.
+ * Key/value store persisted as one encrypted blob (atomic). Secrets (pump pairing keys, LTK) go here.
+ *
+ * Failure handling is deliberately asymmetric, because wiping a pairing silently is worse than refusing:
+ *  - file absent: empty store;
+ *  - file fails authentication / is damaged ([CorruptBlobException], bad JSON): moved aside to `<name>.bak`,
+ *    store starts empty ([recoveredFromCorruption]) - the user has to pair again, the old file is kept;
+ *  - anything else (I/O error, Keystore temporarily unavailable): retried, then the store stays
+ *    [available] = false; reads return null and every write throws, so the file is NEVER overwritten.
+ *    A later access tries again.
  */
 class EncryptedFileKeyValueStore(private val file: File, private val cipher: BlobCipher) : KeyValueStore {
 
     private val map = HashMap<String, String>()
+    private var loaded = false
+
+    @Volatile var recoveredFromCorruption = false
+        private set
+
+    val available: Boolean @Synchronized get() = ensureLoaded()
 
     init {
-        try {
-            if (file.exists()) {
+        ensureLoaded()
+    }
+
+    @Synchronized
+    private fun ensureLoaded(): Boolean {
+        if (loaded) return true
+        if (!file.exists()) { loaded = true; return true }
+        var lastError: Exception? = null
+        repeat(3) {
+            try {
                 val plain = cipher.decrypt(file.readBytes())
                 val obj = Json.parseToJsonElement(String(plain, Charsets.UTF_8)) as JsonObject
+                map.clear()
                 obj.forEach { (k, v) -> map[k] = (v as JsonPrimitive).content }
+                loaded = true
+                return true
+            } catch (e: CorruptBlobException) {
+                return quarantineAndStartEmpty(e)
+            } catch (e: kotlinx.serialization.SerializationException) {
+                return quarantineAndStartEmpty(e)
+            } catch (e: ClassCastException) {
+                return quarantineAndStartEmpty(e)
+            } catch (e: Exception) {
+                lastError = e
             }
-        } catch (e: Exception) {
+        }
+        app.aaps.pump.insight.utils.PumpLog.e("secret store unavailable, not touching ${file.name}", lastError)
+        return false
+    }
+
+    private fun quarantineAndStartEmpty(cause: Exception): Boolean {
+        app.aaps.pump.insight.utils.PumpLog.e("secret store ${file.name} is corrupt; moved aside, starting empty", cause)
+        return try {
+            quarantineFile(file)
             map.clear()
+            recoveredFromCorruption = true
+            loaded = true
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 
-    @Synchronized override fun getString(key: String) = map[key]
+    @Synchronized override fun getString(key: String): String? = if (ensureLoaded()) map[key] else null
 
     @Synchronized
     override fun edit(changes: Map<String, String?>) {
+        check(ensureLoaded()) { "secret store unavailable" }
         val next = HashMap(map)
         changes.forEach { (k, v) -> if (v == null) next.remove(k) else next[k] = v }
         val json = buildJsonObject { next.forEach { (k, v) -> put(k, v) } }.toString()
@@ -142,7 +206,12 @@ class KvIdentityStore(private val kv: KeyValueStore, random: SecureRandom = Secu
             ByteArray(8) { existing.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
         } else {
             val id = ByteArray(8).also { random.nextBytes(it) }
-            kv.putString("bridgeId", id.joinToString("") { "%02x".format(it) })
+            try {
+                kv.putString("bridgeId", id.joinToString("") { "%02x".format(it) })
+            } catch (e: Exception) {
+                // Store unavailable right now: run with an unpersisted id rather than crash the process on start.
+                app.aaps.pump.insight.utils.PumpLog.w("could not persist the bridge id", e)
+            }
             id
         }
     }

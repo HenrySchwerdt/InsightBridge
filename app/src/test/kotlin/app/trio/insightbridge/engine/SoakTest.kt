@@ -46,7 +46,7 @@ class SoakTest {
         // retained engine state is bounded by design (ids remembered per link, one link)
         assertThat(rig.engine.retainedStateSize()).isAtMost(BridgeEngine.MAX_REMEMBERED_IDS + 5)
         assertThat(rig.engine.retainedStateSize()).isAtMost(retainedEarly + 5) // already saturated at 20k
-        assertThat(rig.store.size).isAtMost(64)
+        assertThat(rig.store.size).isAtMost(5000)
         assertThat(rig.link.toCentral.values.all { it.isEmpty() }).isTrue()
         assertThat(rig.link.disconnected).isEmpty()
         // simulator history is bounded too
@@ -55,8 +55,8 @@ class SoakTest {
         assertThat(heapLate - heapEarly).isLessThan(25)
     }
 
-    @Test fun manyDosingRequestIdsKeepTheStoreAt64Entries() = runTest(timeout = 5.minutes) {
-        val rig = Rig(this)
+    @Test fun manyDosingRequestIdsKeepTheStoreAtItsCapacity() = runTest(timeout = 5.minutes) {
+        val rig = Rig(this, maxStoreEntries = 64)
         val c = rig.pairedSession()
         for (i in 1..2_000) {
             c.request("setTBR", """{"percent":120,"duration":15,"requestId":"${uuid(i)}"}""", id = i.toLong())

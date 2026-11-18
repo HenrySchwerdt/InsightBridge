@@ -57,12 +57,21 @@ class IdempotencyStoreTest {
         assertThat(r.outcome.errorCode).isEqualTo(ErrorCode.INTERNAL)
     }
 
-    @Test fun keepsOnlyTheLast64() {
-        val s = store()
+    @Test fun evictsOldestCompletedBeyondCapacity() {
+        val s = IdempotencyStore(file, { now }, maxEntries = 64)
         for (i in 1..100) { s.begin(id(i), "setTBR", "x"); s.complete(id(i), ok) }
         assertThat(s.size).isEqualTo(64)
         assertThat(s.begin(id(100), "setTBR", "x")).isInstanceOf(IdempotencyStore.Begin.Replay::class.java)
         assertThat(s.begin(id(1), "setTBR", "x")).isEqualTo(IdempotencyStore.Begin.Proceed) // evicted
+    }
+
+    @Test fun defaultCapacityHoldsThousandsAndIsBoundedByTtlNotBySixtyFour() {
+        val s = store()
+        for (i in 1..3000) { s.begin(id(i), "setTBR", "x"); s.complete(id(i), ok) }
+        assertThat(s.size).isEqualTo(3000)
+        assertThat(s.begin(id(1), "setTBR", "x")).isInstanceOf(IdempotencyStore.Begin.Replay::class.java)
+        now += 24L * 3600 * 1000 + 1
+        assertThat(s.begin(id(2), "setTBR", "x")).isEqualTo(IdempotencyStore.Begin.Proceed) // expired by TTL
     }
 
     @Test fun entriesExpireAfter24Hours() {

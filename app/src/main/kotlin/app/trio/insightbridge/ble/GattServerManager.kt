@@ -56,9 +56,10 @@ class GattServerManager(
 
     interface Listener {
 
-        fun onConnected(centralId: String)
-        fun onDisconnected(centralId: String)
-        fun onFragment(centralId: String, bytes: ByteArray)
+        /** [generation] is unique per connection: the same device reconnecting gets a new one. */
+        fun onConnected(centralId: String, generation: Long)
+        fun onDisconnected(centralId: String, generation: Long)
+        fun onFragment(centralId: String, generation: Long, bytes: ByteArray)
     }
 
     companion object {
@@ -69,7 +70,7 @@ class GattServerManager(
         private const val ATT_OVERHEAD = 3
     }
 
-    private class Central(val device: BluetoothDevice) {
+    private class Central(val device: BluetoothDevice, val generation: Long) {
 
         var mtu = DEFAULT_MTU
         var subscribed = false
@@ -79,6 +80,7 @@ class GattServerManager(
     }
 
     private val lock = Any()
+    private val generations = java.util.concurrent.atomic.AtomicLong()
     private val notifier = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "gatt-notifier").apply { isDaemon = true } }
     private val centrals = HashMap<String, Central>()
     private var server: BluetoothGattServer? = null
@@ -96,6 +98,7 @@ class GattServerManager(
     @Volatile var lastAdvertiseError: Int = 0
         private set
 
+    /** Label of this bridge for logs/UI; not advertised as the Bluetooth name. */
     val localName: String = "InsightBridge-" + bridgeIdHex.takeLast(4).uppercase()
 
     private fun adapter(): BluetoothAdapter? =
@@ -178,7 +181,7 @@ class GattServerManager(
     private fun stopLocked() {
         try {
             stopAdvertisingLocked()
-            val connected = centrals.keys.toList()
+            val connected = centrals.map { it.key to it.value.generation }
             server?.let {
                 try { it.clearServices() } catch (_: Throwable) {}
                 try { it.close() } catch (_: Throwable) {}
@@ -188,7 +191,7 @@ class GattServerManager(
             serviceAdded = false
             _serverOpen.value = false
             centrals.clear()
-            connected.forEach { id -> notifier.execute { safe { listener.onDisconnected(id) } } }
+            connected.forEach { (id, gen) -> notifier.execute { safe { listener.onDisconnected(id, gen) } } }
         } catch (t: Throwable) {
             PumpLog.e("GATT server stop failed", t)
         }
@@ -201,12 +204,6 @@ class GattServerManager(
             val adapter = adapter() ?: return
             if (!adapter.isEnabled || !permitted()) return
             stopAdvertisingLocked()
-            // The scan response carries the local name; it comes from the adapter name.
-            try {
-                if (adapter.name != localName) adapter.name = localName
-            } catch (t: Throwable) {
-                PumpLog.w("Could not set advertised name", t)
-            }
             val adv = adapter.bluetoothLeAdvertiser ?: run {
                 PumpLog.w("No BLE advertiser available")
                 return
@@ -222,7 +219,14 @@ class GattServerManager(
                 .setIncludeDeviceName(false)
                 .addServiceUuid(ParcelUuid(GattIds.SERVICE))
                 .build()
-            val scan = AdvertiseData.Builder().setIncludeDeviceName(true).build()
+            // The system Bluetooth name is NOT touched (renaming the phone's adapter is intrusive and persistent).
+            // The central finds the bridge by the service UUID; the last 4 hex digits of the bridge id travel as
+            // service data so a UI can tell two bridges apart (PROTOCOL.md's "InsightBridge-XXXX" local name is
+            // therefore not advertised; the real bridgeId is learned at pairing).
+            val scan = AdvertiseData.Builder()
+                .setIncludeDeviceName(false)
+                .addServiceData(ParcelUuid(GattIds.SERVICE), bridgeIdHex.takeLast(4).uppercase().toByteArray(Charsets.US_ASCII))
+                .build()
             val cb = object : AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                     safe {
@@ -280,11 +284,14 @@ class GattServerManager(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) = safe {
             val id = device.address
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                synchronized(lock) { centrals[id] = Central(device) }
-                listener.onConnected(id)
+                val gen = generations.incrementAndGet()
+                val old = synchronized(lock) { val o = centrals.put(id, Central(device, gen)); o?.generation }
+                // A stale entry for the same address (missed disconnect): retire it before announcing the new one.
+                if (old != null) listener.onDisconnected(id, old)
+                listener.onConnected(id, gen)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                val had = synchronized(lock) { centrals.remove(id) != null }
-                if (had) listener.onDisconnected(id)
+                val gen = synchronized(lock) { centrals.remove(id)?.generation }
+                if (gen != null) listener.onDisconnected(id, gen)
                 // Some stacks stop advertising while connected: make sure it is back after a disconnect.
                 synchronized(lock) { if (wanted && server != null && !_advertising.value) startAdvertisingLocked() }
             }
@@ -305,7 +312,10 @@ class GattServerManager(
                     if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, 0, null
                 )
             }
-            if (ok) listener.onFragment(device.address, value!!.copyOf())
+            if (ok) {
+                val gen = synchronized(lock) { centrals[device.address]?.generation }
+                if (gen != null) listener.onFragment(device.address, gen, value!!.copyOf())
+            }
         }
 
         override fun onDescriptorWriteRequest(
@@ -346,8 +356,8 @@ class GattServerManager(
 
     // ------------------------------------------------------------------ LinkTransmitter
 
-    override fun send(centralId: String, fragments: List<ByteArray>): Boolean = synchronized(lock) {
-        val c = centrals[centralId] ?: return false
+    override fun send(centralId: String, generation: Long, fragments: List<ByteArray>): Boolean = synchronized(lock) {
+        val c = centrals[centralId]?.takeIf { it.generation == generation } ?: return false
         if (!c.subscribed) return false
         if (c.queue.size + fragments.size > MAX_QUEUE_PER_CENTRAL) return false
         fragments.forEach { c.queue.addLast(it) }
@@ -359,8 +369,9 @@ class GattServerManager(
         ((centrals[centralId]?.mtu ?: DEFAULT_MTU) - ATT_OVERHEAD).coerceAtLeast(20)
     }
 
-    override fun disconnect(centralId: String) {
-        synchronized(lock) { centrals[centralId]?.let { disconnectLocked(it.device) } }
+    override fun disconnect(centralId: String, generation: Long) {
+        // Only the connection the engine means: a newer connection of the same device must survive.
+        synchronized(lock) { centrals[centralId]?.takeIf { it.generation == generation }?.let { disconnectLocked(it.device) } }
     }
 
     private fun disconnectLocked(device: BluetoothDevice) {
@@ -371,7 +382,7 @@ class GattServerManager(
         }
         val removed = centrals.remove(device.address)
         // Not inline: the engine may be calling us under its own lock (lock order engine -> gatt).
-        if (removed != null) notifier.execute { safe { listener.onDisconnected(device.address) } }
+        if (removed != null) notifier.execute { safe { listener.onDisconnected(device.address, removed.generation) } }
     }
 
     @SuppressLint("WrongConstant") // pre-33 notify path; lint confuses the deprecated setValue overload

@@ -1,0 +1,93 @@
+package app.trio.insightbridge.engine
+
+import app.trio.insightbridge.protocol.EcdhP256
+import app.trio.insightbridge.protocol.HandshakeCodec
+import app.trio.insightbridge.protocol.PairingCrypto
+import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Test
+
+/** Review finding 11: connection generations, idle timeout, newcomers vs. a handshake in progress. */
+@OptIn(ExperimentalCoroutinesApi::class)
+class EngineLinkTest {
+
+    private fun commit() = PairingCrypto.commitment(EcdhP256.generate().publicKey, ByteArray(16))
+
+    @Test fun staleDisconnectOfAnOlderConnectionDoesNotKillTheReconnectedLink() = runTest {
+        val rig = Rig(this)
+        rig.engine.onCentralConnected("AA:00", generation = 1)
+        rig.engine.onCentralConnected("AA:00", generation = 2) // same device reconnects quickly
+        rig.engine.onCentralDisconnected("AA:00", generation = 1) // late callback of the first connection
+        assertThat(rig.engine.phoneState.value).isEqualTo(PhoneLinkState.HANDSHAKE) // link 2 still there
+        // fragments tagged with the old generation are ignored, the new one works
+        val c = FakeCentral("AA:00", rig)
+        rig.pairing.open()
+        val frags = app.trio.insightbridge.protocol.Fragmenter.fragment(
+            app.trio.insightbridge.protocol.Envelope.plaintext(HandshakeCodec.pairStart(commit())), 0, 20
+        )
+        frags.forEach { rig.engine.onFragment("AA:00", it, generation = 1) }
+        assertThat(c.takeHandshake()).isNull()
+        frags.forEach { rig.engine.onFragment("AA:00", it, generation = 2) }
+        assertThat(c.takeHandshake()!!["t"]!!.jsonPrimitive.content).isEqualTo("pairResp")
+        rig.engine.onCentralDisconnected("AA:00", generation = 2)
+        assertThat(rig.engine.phoneState.value).isEqualTo(PhoneLinkState.NONE)
+    }
+
+    @Test fun engineDisconnectsTheRightGeneration() = runTest {
+        val rig = Rig(this)
+        rig.engine.onCentralConnected("AA:00", generation = 7)
+        rig.now += 11_000
+        rig.engine.tick()
+        assertThat(rig.link.disconnectGenerations).contains("AA:00" to 7L)
+    }
+
+    @Test fun anActiveLinkWithoutAuthenticatedFramesIsDroppedAfterTenMinutes() = runTest {
+        val rig = Rig(this)
+        val c = rig.pairedSession()
+        c.request("hello", """{"protocol":2}""")
+        rig.now += 9 * 60_000
+        rig.engine.tick()
+        assertThat(c.isDisconnected()).isFalse()
+        c.request("getStatus") // an authenticated frame resets the idle clock
+        rig.now += 9 * 60_000
+        rig.engine.tick()
+        assertThat(c.isDisconnected()).isFalse()
+        rig.now += 61_000
+        rig.engine.tick()
+        assertThat(c.isDisconnected()).isTrue()
+        assertThat(rig.engine.phoneState.value).isEqualTo(PhoneLinkState.NONE)
+    }
+
+    @Test fun newcomerCannotPushOutAPhoneThatIsMidPairing() = runTest {
+        val rig = Rig(this)
+        val phone = rig.central("AA:00")
+        rig.pairing.open()
+        phone.sendHandshake(HandshakeCodec.pairStart(commit()))
+        assertThat(phone.takeHandshake()!!["t"]!!.jsonPrimitive.content).isEqualTo("pairResp")
+        val attacker = rig.central("EE:66")
+        attacker.sendHandshake(HandshakeCodec.sessionStart("0123456789abcdef", ByteArray(16)))
+        assertThat(attacker.takeHandshake()!!["code"]!!.jsonPrimitive.content).isEqualTo("busy")
+        assertThat(attacker.isDisconnected()).isTrue()
+        assertThat(phone.isDisconnected()).isFalse()
+    }
+
+    @Test fun newcomerCannotPushOutAPhoneWhoseSessionIsPending() = runTest {
+        val rig = Rig(this)
+        val phone = rig.pairedSession() // session started, first encrypted frame not sent yet
+        val newcomer = rig.central("CC:22")
+        newcomer.sendHandshake(HandshakeCodec.sessionStart("0123456789abcdef", ByteArray(16)))
+        assertThat(newcomer.takeHandshake()!!["code"]!!.jsonPrimitive.content).isEqualTo("busy")
+        assertThat(phone.isDisconnected()).isFalse()
+        assertThat(phone.ok(phone.request("hello", """{"protocol":2}"""))).isTrue()
+    }
+
+    @Test fun idleConnectionIsStillReplacedByANewcomer() = runTest {
+        val rig = Rig(this)
+        val idle = rig.central("AA:00") // connected, never sent a handshake
+        val fresh = rig.central("BB:11")
+        assertThat(idle.isDisconnected()).isTrue()
+        assertThat(fresh.isDisconnected()).isFalse()
+    }
+}

@@ -35,19 +35,21 @@ class FakeLink : LinkTransmitter {
     var maxFragment = 20
     var accept = true
 
-    override fun send(centralId: String, fragments: List<ByteArray>): Boolean {
+    val disconnectGenerations = ArrayList<Pair<String, Long>>()
+
+    override fun send(centralId: String, generation: Long, fragments: List<ByteArray>): Boolean {
         if (!accept) return false
         toCentral.getOrPut(centralId) { ArrayDeque() }.addAll(fragments)
         return true
     }
 
     override fun maxFragmentSize(centralId: String) = maxFragment
-    override fun disconnect(centralId: String) { disconnected.add(centralId) }
+    override fun disconnect(centralId: String, generation: Long) { disconnected.add(centralId); disconnectGenerations.add(centralId to generation) }
 }
 
 /** Everything wired together exactly like [app.trio.insightbridge.service.BridgeCore], minus Android. */
 @OptIn(ExperimentalCoroutinesApi::class)
-class Rig(val scope: TestScope, val bridgeVersion: String = "test") {
+class Rig(val scope: TestScope, val bridgeVersion: String = "test", maxStoreEntries: Int = 5000) {
 
     var now = 1_800_000_000_000L
     val clock: () -> Long = { now }
@@ -56,7 +58,7 @@ class Rig(val scope: TestScope, val bridgeVersion: String = "test") {
     val identity = MemoryIdentityStore()
     val pairing = PairingController(clock)
     val idempotencyFile = MemoryTextFile()
-    var store = IdempotencyStore(idempotencyFile, clock)
+    var store = IdempotencyStore(idempotencyFile, clock, maxEntries = maxStoreEntries)
     var phoneActivity = 0
     var requestsSeen = ArrayList<String>()
     val dispatcher = OpDispatcher(

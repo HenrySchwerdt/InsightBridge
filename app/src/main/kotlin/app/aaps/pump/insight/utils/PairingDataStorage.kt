@@ -21,14 +21,20 @@ import org.spongycastle.util.encoders.Hex
 /**
  * Pump pairing data (Sight keys, nonces, MAC address). Ported from AndroidAPS; the backing store
  * is now an encrypted [KeyValueStore] (Android Keystore wrapped) instead of plain SharedPreferences.
- * Nonce updates are written synchronously: reusing a nonce after a crash would make the pump reject us.
+ * Nonces: the pump rejects a nonce that is not larger than the last one, so a nonce must never be reused after
+ * a crash. Instead of an fsync + Keystore write per Sight message, the sent nonce is persisted as a RESERVATION
+ * [NONCE_RESERVE] ahead (at most one write per [NONCE_RESERVE] messages); after a restart the stored value is
+ * used as 'last sent', so it is always >= what was really sent. The received nonce only needs to protect against
+ * replays; it is persisted lazily (every [RECEIVED_PERSIST_EVERY] steps), losing a few steps on a crash is harmless.
  */
 class PairingDataStorage(private val kv: KeyValueStore) {
 
     private var _paired: Boolean = kv.getBoolean("paired", false)
     private var _macAddress: String? = kv.getString("macAddress")
     private var _lastNonceSent: Nonce? = kv.getString("lastNonceSent")?.let { Nonce(Hex.decode(it)) }
-    private var _lastNonceReceived: Nonce? = kv.getString("lastNonceReceived")?.let { Nonce(Hex.decode(it)) }
+    private var sentReserve: Nonce? = _lastNonceSent?.let { Nonce(it.storageValue) }
+    private var receivedPersisted: Nonce? = null
+    private var _lastNonceReceived: Nonce? = kv.getString("lastNonceReceived")?.let { Nonce(Hex.decode(it)) }.also { receivedPersisted = it?.let { n -> Nonce(n.storageValue) } }
     private var _commId: Long = kv.getLong("commId", 0)
     private var _incomingKey: ByteArray? = kv.getString("incomingKey")?.let { Hex.decode(it) }
     private var _outgoingKey: ByteArray? = kv.getString("outgoingKey")?.let { Hex.decode(it) }
@@ -60,6 +66,12 @@ class PairingDataStorage(private val kv: KeyValueStore) {
         }
     }
 
+    companion object {
+
+        const val NONCE_RESERVE = 256
+        const val RECEIVED_PERSIST_EVERY = 64
+    }
+
     private fun hex(b: ByteArray?) = if (b == null) null else Hex.toHexString(b)
 
     @get:Synchronized
@@ -86,7 +98,18 @@ class PairingDataStorage(private val kv: KeyValueStore) {
         get() = _lastNonceSent
         set(value) {
             _lastNonceSent = value
-            kv.putString("lastNonceSent", hex(value?.storageValue))
+            if (value == null) {
+                sentReserve = null
+                kv.putString("lastNonceSent", null)
+                return
+            }
+            val reserve = sentReserve
+            // Only touch the disk when the reservation is used up (or none exists yet).
+            if (reserve == null || !value.isSmallerThan(reserve)) {
+                val next = Nonce(value.storageValue).also { it.increment(NONCE_RESERVE) }
+                kv.putString("lastNonceSent", hex(next.storageValue))
+                sentReserve = next
+            }
         }
 
     @get:Synchronized
@@ -95,7 +118,16 @@ class PairingDataStorage(private val kv: KeyValueStore) {
         get() = _lastNonceReceived
         set(value) {
             _lastNonceReceived = value
-            kv.putString("lastNonceReceived", hex(value?.storageValue))
+            if (value == null) {
+                receivedPersisted = null
+                kv.putString("lastNonceReceived", null)
+                return
+            }
+            val persisted = receivedPersisted
+            if (persisted == null || Nonce(persisted.storageValue).also { it.increment(RECEIVED_PERSIST_EVERY) }.let { !value.isSmallerThan(it) }) {
+                kv.putString("lastNonceReceived", hex(value.storageValue))
+                receivedPersisted = Nonce(value.storageValue)
+            }
         }
 
     @get:Synchronized
@@ -167,6 +199,7 @@ class PairingDataStorage(private val kv: KeyValueStore) {
         _paired = false; _macAddress = null; _commId = 0
         _incomingKey = null; _outgoingKey = null
         _lastNonceReceived = null; _lastNonceSent = null
+        sentReserve = null; receivedPersisted = null
         _firmwareVersions = null; _systemIdentification = null
         // one write for everything
         kv.edit(

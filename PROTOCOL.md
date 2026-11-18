@@ -31,7 +31,11 @@ Division of responsibility:
 | `rx` (iPhone → bridge) | `6FAFD9DD-5BCE-4A1D-B262-A61B50AE7842` | write (with response) |
 | `tx` (bridge → iPhone) | `7EDC9323-9BFA-4A7E-AFBB-92DEE0F0B917` | notify |
 
-- Advertising: service UUID + local name `InsightBridge-XXXX` (last 4 hex of the bridge id).
+- Advertising: service UUID in the advertisement; the scan response carries **service data** for that
+  UUID = the last 4 hex characters of the bridge id, uppercase ASCII (e.g. `A1B2`). The bridge does
+  **not** rename the phone's Bluetooth adapter, so there is no `InsightBridge-…` local name; centrals
+  must identify bridges by service UUID (and, after pairing, by the `bridgeId`) and must not filter
+  by name. Display name: `InsightBridge-` + service data.
 - iOS requests the highest MTU; both sides must work with ATT MTU 23 (payload 20).
 - The bridge accepts **one** bonded central at a time. A second central is rejected with
   `error.busy` once the frame layer is up.

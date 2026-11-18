@@ -99,3 +99,48 @@ class SightMappingTest {
         @Suppress("UNUSED_VARIABLE") val unused = BolusDeliveredEvent()
     }
 }
+
+/** Review findings 4 and 5: pure parts of the Sight backend. */
+class SightBackendLogicTest {
+
+    private fun tbr(percent: Int, initial: Int, remaining: Int) =
+        app.aaps.pump.insight.descriptors.ActiveTBR().also { it.percentage = percent; it.initialDuration = initial; it.remainingDuration = remaining }
+
+    @Test fun tbrRemainingShrinksWithTheElapsedTimeAndStartStaysFixed() {
+        val readAt = 1_800_000_000_000L
+        val t = tbr(150, initial = 60, remaining = 42) // ran for 18 min when read
+        val atRead = SightMapping.tbrView(t, readAt, readAt)!!
+        assertThat(atRead.remaining).isEqualTo(42)
+        val later = SightMapping.tbrView(t, readAt, readAt + 10 * 60_000)!!
+        assertThat(later.remaining).isEqualTo(32)
+        assertThat(later.start).isEqualTo(atRead.start) // start does not move with the clock
+        assertThat(later.percent).isEqualTo(150); assertThat(later.duration).isEqualTo(60)
+        assertThat(atRead.start).isEqualTo(java.time.Instant.ofEpochMilli(readAt).minusSeconds(18 * 60).toString())
+    }
+
+    @Test fun anExpiredTbrDisappearsInsteadOfBeingReportedStale() {
+        val readAt = 1_800_000_000_000L
+        val t = tbr(150, 60, 5)
+        assertThat(SightMapping.tbrView(t, readAt, readAt + 4 * 60_000)!!.remaining).isEqualTo(1)
+        assertThat(SightMapping.tbrView(t, readAt, readAt + 5 * 60_000)).isNull()
+        assertThat(SightMapping.tbrView(t, readAt, readAt + 3_600_000)).isNull()
+    }
+
+    @Test fun profileVerdictNothingSentIsCertain() {
+        assertThat(SightMapping.profileVerdict(sessionFailed = true, transmitted = false, readBackAvailable = false, readBackMatches = false))
+            .isEqualTo(SightMapping.ProfileVerdict.NOT_SENT)
+    }
+
+    @Test fun profileVerdictTransmittedThenFailedIsDecidedByTheReadBackOnly() {
+        // session reported an error but the pump holds the requested profile: success
+        assertThat(SightMapping.profileVerdict(true, true, true, true)).isEqualTo(SightMapping.ProfileVerdict.SUCCESS)
+        // error and the pump holds something else: verifyFailed (known state, not applied)
+        assertThat(SightMapping.profileVerdict(true, true, true, false)).isEqualTo(SightMapping.ProfileVerdict.VERIFY_FAILED)
+        // link lost, cannot read back: uncertain
+        assertThat(SightMapping.profileVerdict(true, true, false, false)).isEqualTo(SightMapping.ProfileVerdict.UNCERTAIN)
+        // clean session: same rules
+        assertThat(SightMapping.profileVerdict(false, true, true, true)).isEqualTo(SightMapping.ProfileVerdict.SUCCESS)
+        assertThat(SightMapping.profileVerdict(false, true, true, false)).isEqualTo(SightMapping.ProfileVerdict.VERIFY_FAILED)
+        assertThat(SightMapping.profileVerdict(false, true, false, false)).isEqualTo(SightMapping.ProfileVerdict.UNCERTAIN)
+    }
+}

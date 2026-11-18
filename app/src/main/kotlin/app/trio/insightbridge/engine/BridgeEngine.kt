@@ -38,12 +38,12 @@ import kotlinx.serialization.json.JsonObject
 interface LinkTransmitter {
 
     /** Queues all [fragments] (in order) as notifications. False if the link is gone / queue full. */
-    fun send(centralId: String, fragments: List<ByteArray>): Boolean
+    fun send(centralId: String, generation: Long, fragments: List<ByteArray>): Boolean
 
     /** Largest ATT value (notification payload) usable for this central: MTU - 3, at least 20. */
     fun maxFragmentSize(centralId: String): Int
 
-    fun disconnect(centralId: String)
+    fun disconnect(centralId: String, generation: Long)
 }
 
 /** What the UI/health layer sees of the iPhone side. */
@@ -71,6 +71,8 @@ class BridgeEngine(
 
         const val SESSION_FIRST_MESSAGE_TIMEOUT_MS = 10_000L
         const val HANDSHAKE_TIMEOUT_MS = 10_000L
+        /** An ACTIVE link that has produced no authenticated frame for this long is a half-open or abandoned connection. */
+        const val ACTIVE_IDLE_TIMEOUT_MS = 10 * 60_000L
         const val MAX_INFLIGHT_PER_LINK = 8
         const val MAX_REMEMBERED_IDS = 1024
         const val PROGRESS_MIN_INTERVAL_MS = 2_000L
@@ -90,7 +92,7 @@ class BridgeEngine(
         val revealed: Boolean get() = ltk != null
     }
 
-    private inner class Link(val id: String, val connectedAt: Long) {
+    private inner class Link(val id: String, val generation: Long, val connectedAt: Long) {
 
         val reassembler = Reassembler(clock)
         var phase = Phase.HANDSHAKE
@@ -104,6 +106,9 @@ class BridgeEngine(
         val inflight = AtomicInteger()
         val seenIds = LinkedHashSet<Long>()
         var lastProgressSent = 0L
+        /** A valid handshake message was received: this link is mid-handshake and must not be pushed out by a newcomer. */
+        var engaged = false
+        var lastAuthAt = 0L
     }
 
     private val lock = Any()
@@ -118,14 +123,21 @@ class BridgeEngine(
 
     // ------------------------------------------------------------------ BLE callbacks
 
-    fun onCentralConnected(centralId: String) = guarded("connect") {
+    /**
+     * A central connected. [generation] identifies THIS connection (the same device may reconnect with the
+     * same address): late callbacks of an older connection are ignored.
+     */
+    fun onCentralConnected(centralId: String, generation: Long = 0) = guarded("connect") {
         synchronized(lock) {
-            val link = Link(centralId, clock())
-            val active = links.values.firstOrNull { it.phase == Phase.ACTIVE && it.id != centralId }
-            if (active != null) {
+            // The same device reconnecting: whatever was left of its previous connection is dead.
+            links[centralId]?.let { dropLocked(it, "reconnected", disconnect = false) }
+            val link = Link(centralId, generation, clock())
+            // A phone that is authenticated or in the middle of pairing / a handshake is never pushed out by a
+            // newcomer: the newcomer is told "busy". Only idle connections (no valid handshake traffic) are replaced.
+            val busy = links.values.any { it.id != centralId && (it.phase != Phase.HANDSHAKE || it.engaged) }
+            if (busy) {
                 link.rejectBusy = true
             } else {
-                // A newer central replaces anything that has not completed a session.
                 links.values.filter { it.id != centralId }.toList().forEach { dropLocked(it, "replaced by newer central") }
             }
             links[centralId] = link
@@ -133,16 +145,18 @@ class BridgeEngine(
         }
     }
 
-    fun onCentralDisconnected(centralId: String) = guarded("disconnect") {
+    fun onCentralDisconnected(centralId: String, generation: Long = 0) = guarded("disconnect") {
         synchronized(lock) {
-            val link = links.remove(centralId) ?: return@synchronized
+            val link = links[centralId] ?: return@synchronized
+            if (link.generation != generation) return@synchronized // stale callback of an older connection
+            links.remove(centralId)
             abortAttemptLocked(link, "disconnected")
             updatePhoneStateLocked()
         }
     }
 
-    fun onFragment(centralId: String, fragment: ByteArray) = guarded("fragment") {
-        val link = synchronized(lock) { links[centralId] } ?: return@guarded
+    fun onFragment(centralId: String, fragment: ByteArray, generation: Long = 0) = guarded("fragment") {
+        val link = synchronized(lock) { links[centralId]?.takeIf { it.generation == generation } } ?: return@guarded
         if (link.rejectBusy) {
             sendPlainRaw(link, HandshakeCodec.error(ErrorCode.BUSY, "Another device is connected"))
             synchronized(lock) { dropLocked(link, "busy") }
@@ -167,7 +181,7 @@ class BridgeEngine(
                     Phase.HANDSHAKE -> if (now - link.connectedAt > HANDSHAKE_TIMEOUT_MS) dropLocked(link, "handshake timeout")
                     Phase.PAIRING -> link.attempt?.let { if (now > it.deadline) dropLocked(link, "pairing timeout") }
                     Phase.SESSION_PENDING -> if (now > link.sessionDeadline) dropLocked(link, "no valid message after session start")
-                    Phase.ACTIVE -> Unit
+                    Phase.ACTIVE -> if (now - link.lastAuthAt > ACTIVE_IDLE_TIMEOUT_MS) dropLocked(link, "no authenticated frame for ${ACTIVE_IDLE_TIMEOUT_MS / 60_000} min")
                 }
             }
         }
@@ -215,14 +229,16 @@ class BridgeEngine(
         }
     }
 
-    private fun dropLocked(link: Link, reason: String) {
+    private fun dropLocked(link: Link, reason: String, disconnect: Boolean = true) {
         PumpLog.i("Dropping central link: $reason")
-        links.remove(link.id)
+        if (links[link.id] === link) links.remove(link.id)
         abortAttemptLocked(link, reason)
-        try {
-            transmitter.disconnect(link.id)
-        } catch (t: Throwable) {
-            PumpLog.w("disconnect failed", t)
+        if (disconnect) {
+            try {
+                transmitter.disconnect(link.id, link.generation)
+            } catch (t: Throwable) {
+                PumpLog.w("disconnect failed", t)
+            }
         }
         updatePhoneStateLocked()
     }
@@ -265,6 +281,7 @@ class BridgeEngine(
             PumpLog.d("invalid handshake: ${e.message}")
             return
         }
+        if (msg !is Handshake.Unknown) synchronized(lock) { link.engaged = true }
         when (msg) {
             is Handshake.PairStart -> onPairStart(link, msg)
             is Handshake.PairReveal -> onPairReveal(link, msg)
@@ -438,6 +455,7 @@ class BridgeEngine(
                 updatePhoneStateLocked()
             }
         }
+        synchronized(lock) { link.lastAuthAt = clock() }
         onPhoneActivity()
         val frame = try {
             RequestParser.parseObject(plain)
@@ -506,7 +524,7 @@ class BridgeEngine(
         val max = transmitter.maxFragmentSize(link.id).coerceAtLeast(20)
         val fragments = Fragmenter.fragment(envelope, link.seqOut, max)
         link.seqOut = (link.seqOut + 1) and 0xFFFF
-        if (!transmitter.send(link.id, fragments)) {
+        if (!transmitter.send(link.id, link.generation, fragments)) {
             // Not inline: callers hold the link lock and dropLocked needs the engine lock (lock order).
             scope.launch(exceptionHandler) { synchronized(lock) { if (links[link.id] === link) dropLocked(link, "transmit queue full or link gone") } }
         }

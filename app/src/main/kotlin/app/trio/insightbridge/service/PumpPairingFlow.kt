@@ -19,6 +19,7 @@ import app.aaps.pump.insight.exceptions.TimeoutException
 import app.aaps.pump.insight.exceptions.satl_errors.SatlPairingRejectedException
 import app.aaps.pump.insight.utils.PumpLog
 import app.trio.insightbridge.BridgeRuntime
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,7 +27,7 @@ import kotlinx.coroutines.flow.asStateFlow
 data class DiscoveredPump(val name: String, val address: String)
 
 /** Why pump pairing failed (the UI maps these to troubleshooting text). */
-enum class PumpPairFailure { REJECTED, TIMEOUT, CONNECTION_FAILED, BLUETOOTH_UNAVAILABLE, OTHER }
+enum class PumpPairFailure { REJECTED, TIMEOUT, CONNECTION_FAILED, BLUETOOTH_UNAVAILABLE, OTHER, SIMULATOR_ACTIVE }
 
 sealed interface PumpPairState {
 
@@ -100,6 +101,11 @@ class PumpPairingFlow(private val rt: BridgeRuntime) {
 
     fun select(address: String) {
         stopScan()
+        // The simulator and a real pump are mutually exclusive: never pair while the simulator is on.
+        if (rt.settings.simulatorEnabled) {
+            _state.value = PumpPairState.Failed(PumpPairFailure.SIMULATOR_ACTIVE)
+            return
+        }
         val conn = rt.connection
         if (conn.isPaired) conn.reset()
         _state.value = PumpPairState.Connecting(address)
@@ -115,7 +121,9 @@ class PumpPairingFlow(private val rt: BridgeRuntime) {
             override fun onPumpPaired() {
                 _state.value = PumpPairState.Done
                 release()
-                rt.refreshBackend()
+                // Not inline: this callback runs under the connection's monitor, refreshBackend takes the
+                // runtime lock and (indirectly) the connection monitor again - lock order inversion.
+                rt.scope.launch { rt.refreshBackend() }
             }
         }
         val ex = object : InsightConnection.ExceptionCallback {
