@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">InsightBridge</string>
+
+    <string name="channel_status">Bridge status</string>
+    <string name="channel_alert">Pump alerts</string>
+    <string name="channel_health">Bridge health warnings</string>
+
+    <string name="state_connected">connected</string>
+    <string name="state_connecting">connecting</string>
+    <string name="state_disconnected">disconnected</string>
+    <string name="state_not_paired">not paired</string>
+
+    <string name="sim_banner">SIMULATED PUMP – NO INSULIN IS DELIVERED</string>
+    <string name="notif_status_title">InsightBridge is running</string>
+    <string name="notif_status_links">Pump: %1$s · iPhone: %2$s</string>
+    <string name="notif_status_health">Up %1$s · pump seen %2$s · iPhone request %3$s</string>
+
+    <string name="notif_alert_title">Pump alert: %1$s</string>
+    <string name="action_confirm_alert">Confirm</string>
+    <string name="action_snooze_alert">Snooze</string>
+
+    <string name="notif_pump_unreachable_title">Pump not reachable</string>
+    <string name="notif_pump_unreachable_text">The Insight pump has not answered for more than 15 minutes. Check that it is nearby, has battery and Bluetooth is on. Trio cannot control the pump until this is fixed.</string>
+    <string name="notif_restarted_title">InsightBridge restarted</string>
+    <string name="notif_restarted_text">The app stopped unexpectedly and was restarted automatically. Open the app to check the log.</string>
+    <string name="notif_permissions_title">InsightBridge needs permissions</string>
+    <string name="notif_permissions_text">Bluetooth permissions are missing, so the bridge cannot run. Open the app and grant them.</string>
+    <string name="notif_not_running_title">InsightBridge is not running</string>
+    <string name="notif_not_running_text">Android did not allow the bridge to start in the background. Tap to open the app and start it.</string>
+</resources>

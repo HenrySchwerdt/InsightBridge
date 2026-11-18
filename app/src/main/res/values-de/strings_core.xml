@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">InsightBridge</string>
+
+    <string name="channel_status">Bridge-Status</string>
+    <string name="channel_alert">Pumpenalarme</string>
+    <string name="channel_health">Bridge-Warnungen</string>
+
+    <string name="state_connected">verbunden</string>
+    <string name="state_connecting">verbindet</string>
+    <string name="state_disconnected">getrennt</string>
+    <string name="state_not_paired">nicht gekoppelt</string>
+
+    <string name="sim_banner">SIMULIERTE PUMPE – ES WIRD KEIN INSULIN ABGEGEBEN</string>
+    <string name="notif_status_title">InsightBridge läuft</string>
+    <string name="notif_status_links">Pumpe: %1$s · iPhone: %2$s</string>
+    <string name="notif_status_health">Läuft seit %1$s · Pumpe zuletzt %2$s · iPhone-Anfrage %3$s</string>
+
+    <string name="notif_alert_title">Pumpenalarm: %1$s</string>
+    <string name="action_confirm_alert">Bestätigen</string>
+    <string name="action_snooze_alert">Schlummern</string>
+
+    <string name="notif_pump_unreachable_title">Pumpe nicht erreichbar</string>
+    <string name="notif_pump_unreachable_text">Die Insight-Pumpe antwortet seit mehr als 15 Minuten nicht. Prüfen Sie, ob sie in der Nähe ist, Batterie hat und Bluetooth eingeschaltet ist. Trio kann die Pumpe erst wieder steuern, wenn das behoben ist.</string>
+    <string name="notif_restarted_title">InsightBridge neu gestartet</string>
+    <string name="notif_restarted_text">Die App wurde unerwartet beendet und automatisch neu gestartet. Öffnen Sie die App und prüfen Sie das Protokoll.</string>
+    <string name="notif_permissions_title">InsightBridge braucht Berechtigungen</string>
+    <string name="notif_permissions_text">Bluetooth-Berechtigungen fehlen, die Bridge kann nicht laufen. Öffnen Sie die App und erteilen Sie sie.</string>
+    <string name="notif_not_running_title">InsightBridge läuft nicht</string>
+    <string name="notif_not_running_text">Android hat den Start im Hintergrund nicht erlaubt. Tippen Sie, um die App zu öffnen und die Bridge zu starten.</string>
+</resources>
