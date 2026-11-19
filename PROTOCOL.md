@@ -67,8 +67,10 @@ Bridge (Android):
    10 s handshake timeout each). When a newcomer **completes an authenticated session as the paired
    client** (valid first encrypted message), every older link is closed immediately. Unauthenticated
    newcomers never displace anything.
-3. Drops an ACTIVE link after 3 minutes without an authenticated frame (the central pings every
-   60 s).
+3. Drops an ACTIVE link after 15 minutes without an authenticated frame. The central pings every
+   60 s while awake, but a backgrounded iPhone app is only woken every few minutes, so the timeout
+   must stay well above one loop interval; ghost links are removed by preemption (rule 2), not by
+   this timeout.
 4. Recreates the GATT server and advertising after Bluetooth restarts, advertising failures, or
    when the GATT service disappears, and never needs the user to open the app for that.
 

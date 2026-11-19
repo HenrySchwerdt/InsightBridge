@@ -92,10 +92,12 @@ class BridgeEngine(
         const val SESSION_FIRST_MESSAGE_TIMEOUT_MS = 10_000L
         const val HANDSHAKE_TIMEOUT_MS = 10_000L
         /**
-         * An ACTIVE link that has produced no authenticated frame for this long is a half-open or abandoned
-         * connection (the central pings every 60 s, PROTOCOL.md section 1a).
+         * An ACTIVE link that has produced no authenticated frame for this long is treated as abandoned. The central
+         * pings every 60 s while awake, but an iPhone app in the background is only woken every few minutes (CGM
+         * readings / loop cycles), so this must stay well above one loop interval. Ghost links are handled by
+         * preemption (an authenticated newcomer closes them at once), not by this timeout (PROTOCOL.md section 1a).
          */
-        const val ACTIVE_IDLE_TIMEOUT_MS = 3 * 60_000L
+        const val ACTIVE_IDLE_TIMEOUT_MS = 15 * 60_000L
         /** Links that have not completed a session yet and may run their handshakes in parallel. */
         const val MAX_PARALLEL_HANDSHAKES = 3
         const val MAX_INFLIGHT_PER_LINK = 8

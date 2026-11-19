@@ -43,15 +43,15 @@ class EngineLinkTest {
         assertThat(rig.link.disconnectGenerations).contains("AA:00" to 7L)
     }
 
-    @Test fun anActiveLinkWithoutAuthenticatedFramesIsDroppedAfterThreeMinutes() = runTest {
+    @Test fun anActiveLinkWithoutAuthenticatedFramesIsDroppedAfterTheIdleTimeout() = runTest {
         val rig = Rig(this)
         val c = rig.pairedSession()
         c.request("hello", """{"protocol":2}""")
-        rig.now += 2 * 60_000
+        rig.now += BridgeEngine.ACTIVE_IDLE_TIMEOUT_MS - 60_000
         rig.engine.tick()
         assertThat(c.isDisconnected()).isFalse()
         c.request("getStatus") // an authenticated frame resets the idle clock
-        rig.now += 2 * 60_000
+        rig.now += BridgeEngine.ACTIVE_IDLE_TIMEOUT_MS - 60_000
         rig.engine.tick()
         assertThat(c.isDisconnected()).isFalse()
         rig.now += 61_000

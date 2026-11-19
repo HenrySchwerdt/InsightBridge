@@ -196,11 +196,11 @@ class LinkRecoveryTest {
 
     // ------------------------------------------------------------------ idle timeout and ping
 
-    @Test fun anActiveLinkIsDroppedAfterThreeIdleMinutesAndTheReasonIsRecorded() = runTest {
+    @Test fun anActiveLinkIsDroppedAfterTheIdleTimeoutAndTheReasonIsRecorded() = runTest {
         val events = Recorder()
         val rig = Rig(this, linkEvents = events)
         val c = rig.activeGhost()
-        rig.now += 179_000
+        rig.now += BridgeEngine.ACTIVE_IDLE_TIMEOUT_MS - 1_000
         rig.engine.tick()
         assertThat(c.isDisconnected()).isFalse()
         rig.now += 2_000
@@ -219,9 +219,20 @@ class LinkRecoveryTest {
             assertThat(c.ok(c.request("ping"))).isTrue()
         }
         assertThat(c.isDisconnected()).isFalse()
-        rig.now += 181_000
+        rig.now += BridgeEngine.ACTIVE_IDLE_TIMEOUT_MS + 1_000
         rig.engine.tick()
         assertThat(c.isDisconnected()).isTrue()
+    }
+
+    @Test fun aBackgroundedPhoneWokenEveryFiveMinutesKeepsItsLink() = runTest {
+        val rig = Rig(this)
+        val c = rig.activeGhost()
+        repeat(12) {
+            rig.now += 5 * 60_000
+            rig.engine.tick()
+            assertThat(c.isDisconnected()).isFalse()
+            assertThat(c.ok(c.request("ping"))).isTrue()
+        }
     }
 
     @Test fun pingReportsUptimeLinkStateAndStatusTimestampWithoutPumpTraffic() = runTest {
