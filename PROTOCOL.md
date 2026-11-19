@@ -195,7 +195,7 @@ timestamps ISO-8601 UTC with `Z`, pump-local times additionally as `pumpLocal` s
 | `confirmAlert` | `{"alertId":int,"alertType":"…"}` | `{}` |
 | `snoozeAlert` | `{"alertId":int,"alertType":"…"}` | `{}` |
 | `getRequestOutcome` | `{"requestId":"<uuid>"}` | `{"state":"unknown"\|"inProgress"\|"succeeded"\|"failed"\|"uncertain","result":{…}\|null,"error":{…}\|null,"completedAt":"…Z"\|null}` |
-| `ping` | – | `{"uptimeSeconds":int,"pumpLink":"…","statusTimestamp":"…Z"\|null}` (no pump traffic; answer < 1 s) |
+| `ping` | – | `{"uptimeSeconds":int,"pumpLink":"…","statusTimestamp":"…Z"\|null}` (no pump traffic; answered < 1 s and **concurrently** with any running command, never queued behind it) |
 | `pumpPairingStatus` | – | `{"paired":bool,"serial":str\|null,"bridgeBluetoothOn":bool}` |
 
 Rules:
