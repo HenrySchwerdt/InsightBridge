@@ -114,6 +114,7 @@ fun WizardScreen(
             phonePaired = health.phonePaired || rt.phonePaired || phoneState is app.trio.insightbridge.engine.PairingUiState.Done,
             onBack = goBack,
             resetStale = mode == WizardMode.PHONE_ONLY,
+            bridgeVisible = health.advertising || !health.serviceRunning,
             onFinished = { if (mode == WizardMode.PHONE_ONLY) onExit() else step = S_DONE }
         )
         else -> DoneStep(

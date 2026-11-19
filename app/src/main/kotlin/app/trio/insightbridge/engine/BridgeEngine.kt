@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** Bottom of the stack: how the engine talks to the BLE layer. */
 interface LinkTransmitter {
@@ -50,6 +51,22 @@ interface LinkTransmitter {
 enum class PhoneLinkState { NONE, HANDSHAKE, SESSION }
 
 /**
+ * Diagnostics sink for link lifecycle events (PROTOCOL.md section 1a). Implemented by the service to feed the
+ * "connection health" statistics; the engine itself also writes every event, with its reason, to the log.
+ * Callbacks run while the engine holds its lock: implementations must be quick and must not call back into it.
+ */
+interface LinkEventListener {
+
+    /** A central completed an authenticated session (valid first encrypted message). [preempted] older links were closed. */
+    fun onSessionEstablished(centralId: String, preempted: Int) {}
+
+    /** A link ended. [wasSession] = it had completed an authenticated session. */
+    fun onLinkClosed(centralId: String, reason: String, wasSession: Boolean, durationMs: Long) {}
+
+    object None : LinkEventListener
+}
+
+/**
  * Transport independent bridge protocol engine: fragments -> envelope -> handshake / session ->
  * [OpDispatcher]. All BLE specifics are behind [LinkTransmitter] so the whole pipeline runs in JVM tests.
  *
@@ -64,15 +81,23 @@ class BridgeEngine(
     private val dispatcher: OpDispatcher,
     private val transmitter: LinkTransmitter,
     private val random: SecureRandom = SecureRandom(),
-    private val onPhoneActivity: () -> Unit = {}
+    private val onPhoneActivity: () -> Unit = {},
+    private val linkEvents: LinkEventListener = LinkEventListener.None,
+    private val onRequestStart: () -> Unit = {},
+    private val onRequestEnd: () -> Unit = {}
 ) : PairingController.Listener {
 
     companion object {
 
         const val SESSION_FIRST_MESSAGE_TIMEOUT_MS = 10_000L
         const val HANDSHAKE_TIMEOUT_MS = 10_000L
-        /** An ACTIVE link that has produced no authenticated frame for this long is a half-open or abandoned connection. */
-        const val ACTIVE_IDLE_TIMEOUT_MS = 10 * 60_000L
+        /**
+         * An ACTIVE link that has produced no authenticated frame for this long is a half-open or abandoned
+         * connection (the central pings every 60 s, PROTOCOL.md section 1a).
+         */
+        const val ACTIVE_IDLE_TIMEOUT_MS = 3 * 60_000L
+        /** Links that have not completed a session yet and may run their handshakes in parallel. */
+        const val MAX_PARALLEL_HANDSHAKES = 3
         const val MAX_INFLIGHT_PER_LINK = 8
         const val MAX_REMEMBERED_IDS = 1024
         const val PROGRESS_MIN_INTERVAL_MS = 2_000L
@@ -92,27 +117,29 @@ class BridgeEngine(
         val revealed: Boolean get() = ltk != null
     }
 
-    private inner class Link(val id: String, val generation: Long, val connectedAt: Long) {
+    private inner class Link(val id: String, val generation: Long, val connectedAt: Long, val order: Long) {
 
         val reassembler = Reassembler(clock)
         var phase = Phase.HANDSHAKE
+        /** When the current phase began (handshake timeout is measured from here). */
+        var phaseSince = connectedAt
+        /** Set once the link was dropped: late results must not be sent to it. */
+        @Volatile var closed = false
         var seqOut = 0
         var sealer: SealingChannel? = null
         var opener: OpeningChannel? = null
         var sessionDeadline = 0L
         var attempt: PairAttempt? = null
-        var rejectBusy = false
         var pendingClientId: String? = null
         val inflight = AtomicInteger()
         val seenIds = LinkedHashSet<Long>()
         var lastProgressSent = 0L
-        /** A valid handshake message was received: this link is mid-handshake and must not be pushed out by a newcomer. */
-        var engaged = false
         var lastAuthAt = 0L
     }
 
     private val lock = Any()
     private val links = LinkedHashMap<String, Link>()
+    private var nextOrder = 0L
     private val exceptionHandler = CoroutineExceptionHandler { _, t -> PumpLog.e("Unhandled engine coroutine failure", t) }
     private val _phoneState = MutableStateFlow(PhoneLinkState.NONE)
     val phoneState: StateFlow<PhoneLinkState> = _phoneState.asStateFlow()
@@ -126,42 +153,41 @@ class BridgeEngine(
     /**
      * A central connected. [generation] identifies THIS connection (the same device may reconnect with the
      * same address): late callbacks of an older connection are ignored.
+     *
+     * PROTOCOL.md 1a: a newcomer is always accepted, also while a session is ACTIVE (that session may be a ghost
+     * whose disconnect was never reported). Handshakes run in parallel (at most [MAX_PARALLEL_HANDSHAKES]); only a
+     * newcomer that completes an authenticated session displaces older links, see [handleEncrypted].
      */
     fun onCentralConnected(centralId: String, generation: Long = 0) = guarded("connect") {
         synchronized(lock) {
             // The same device reconnecting: whatever was left of its previous connection is dead.
             links[centralId]?.let { dropLocked(it, "reconnected", disconnect = false) }
-            val link = Link(centralId, generation, clock())
-            // A phone that is authenticated or in the middle of pairing / a handshake is never pushed out by a
-            // newcomer: the newcomer is told "busy". Only idle connections (no valid handshake traffic) are replaced.
-            val busy = links.values.any { it.id != centralId && (it.phase != Phase.HANDSHAKE || it.engaged) }
-            if (busy) {
-                link.rejectBusy = true
-            } else {
-                links.values.filter { it.id != centralId }.toList().forEach { dropLocked(it, "replaced by newer central") }
-            }
+            val link = Link(centralId, generation, clock(), nextOrder++)
             links[centralId] = link
+            PumpLog.i("BLE ${tag(link)} connected (${links.size} link(s), ${links.values.count { it.phase == Phase.ACTIVE }} active)")
+            // Limit parallel handshakes: the oldest link that has not completed a session goes first. A link in the
+            // middle of pairing (user is comparing codes) is never the victim.
+            while (links.values.count { it.phase != Phase.ACTIVE } > MAX_PARALLEL_HANDSHAKES) {
+                val victim = links.values.firstOrNull { it.phase != Phase.ACTIVE && it.phase != Phase.PAIRING && it !== link } ?: break
+                dropLocked(victim, "too many parallel handshakes")
+            }
             updatePhoneStateLocked()
         }
     }
 
-    fun onCentralDisconnected(centralId: String, generation: Long = 0) = guarded("disconnect") {
+    fun onCentralDisconnected(centralId: String, generation: Long = 0, reason: String = "disconnected") = guarded("disconnect") {
         synchronized(lock) {
             val link = links[centralId] ?: return@synchronized
-            if (link.generation != generation) return@synchronized // stale callback of an older connection
-            links.remove(centralId)
-            abortAttemptLocked(link, "disconnected")
-            updatePhoneStateLocked()
+            if (link.generation != generation) {
+                PumpLog.d("BLE ${tag(link)} ignoring stale disconnect of generation $generation")
+                return@synchronized
+            }
+            dropLocked(link, reason, disconnect = false)
         }
     }
 
     fun onFragment(centralId: String, fragment: ByteArray, generation: Long = 0) = guarded("fragment") {
-        val link = synchronized(lock) { links[centralId]?.takeIf { it.generation == generation } } ?: return@guarded
-        if (link.rejectBusy) {
-            sendPlainRaw(link, HandshakeCodec.error(ErrorCode.BUSY, "Another device is connected"))
-            synchronized(lock) { dropLocked(link, "busy") }
-            return@guarded
-        }
+        val link = synchronized(lock) { links[centralId]?.takeIf { it.generation == generation && !it.closed } } ?: return@guarded
         when (val r = link.reassembler.feed(fragment)) {
             is ReassemblyResult.Incomplete -> Unit
             is ReassemblyResult.Dropped -> PumpLog.d("fragment dropped: ${r.reason}")
@@ -178,10 +204,10 @@ class BridgeEngine(
             for (link in links.values.toList()) {
                 link.reassembler.expire()
                 when (link.phase) {
-                    Phase.HANDSHAKE -> if (now - link.connectedAt > HANDSHAKE_TIMEOUT_MS) dropLocked(link, "handshake timeout")
+                    Phase.HANDSHAKE -> if (now - link.phaseSince > HANDSHAKE_TIMEOUT_MS) dropLocked(link, "handshake timeout")
                     Phase.PAIRING -> link.attempt?.let { if (now > it.deadline) dropLocked(link, "pairing timeout") }
                     Phase.SESSION_PENDING -> if (now > link.sessionDeadline) dropLocked(link, "no valid message after session start")
-                    Phase.ACTIVE -> if (now - link.lastAuthAt > ACTIVE_IDLE_TIMEOUT_MS) dropLocked(link, "no authenticated frame for ${ACTIVE_IDLE_TIMEOUT_MS / 60_000} min")
+                    Phase.ACTIVE -> if (now - link.lastAuthAt > ACTIVE_IDLE_TIMEOUT_MS) dropLocked(link, "idle timeout: no authenticated frame for ${(now - link.lastAuthAt) / 1000} s")
                 }
             }
         }
@@ -196,7 +222,7 @@ class BridgeEngine(
 
     /** Sends an unsolicited event to the active phone (no-op without one). */
     fun broadcastEvent(event: JsonObject, throttleKey: String? = null) {
-        val link = synchronized(lock) { links.values.firstOrNull { it.phase == Phase.ACTIVE } } ?: return
+        val link = synchronized(lock) { links.values.lastOrNull { it.phase == Phase.ACTIVE } } ?: return
         if (throttleKey != null) {
             val now = clock()
             if (now - link.lastProgressSent < PROGRESS_MIN_INTERVAL_MS) return
@@ -230,7 +256,11 @@ class BridgeEngine(
     }
 
     private fun dropLocked(link: Link, reason: String, disconnect: Boolean = true) {
-        PumpLog.i("Dropping central link: $reason")
+        if (link.closed) return
+        link.closed = true
+        val now = clock()
+        val wasSession = link.phase == Phase.ACTIVE || link.lastAuthAt > 0
+        PumpLog.i("BLE ${tag(link)} closed: $reason (phase=${link.phase.name.lowercase()}, session=$wasSession, up ${(now - link.connectedAt) / 1000} s)")
         if (links[link.id] === link) links.remove(link.id)
         abortAttemptLocked(link, reason)
         if (disconnect) {
@@ -240,8 +270,16 @@ class BridgeEngine(
                 PumpLog.w("disconnect failed", t)
             }
         }
+        try {
+            linkEvents.onLinkClosed(link.id, reason, wasSession, now - link.connectedAt)
+        } catch (t: Throwable) {
+            PumpLog.w("link event listener failed", t)
+        }
         updatePhoneStateLocked()
     }
+
+    /** Short, non-identifying label for logs: last two address octets plus connection generation. */
+    private fun tag(link: Link) = "${link.id.takeLast(5)}#${link.generation}"
 
     private fun abortAttemptLocked(link: Link, reason: String) {
         if (link.attempt != null) {
@@ -281,7 +319,6 @@ class BridgeEngine(
             PumpLog.d("invalid handshake: ${e.message}")
             return
         }
-        if (msg !is Handshake.Unknown) synchronized(lock) { link.engaged = true }
         when (msg) {
             is Handshake.PairStart -> onPairStart(link, msg)
             is Handshake.PairReveal -> onPairReveal(link, msg)
@@ -396,6 +433,8 @@ class BridgeEngine(
         sendPlainRaw(link, HandshakeCodec.pairDone(PairingCrypto.confirmMacBridge(ltk)))
         link.attempt = null
         link.phase = Phase.HANDSHAKE
+        link.phaseSince = clock()
+        PumpLog.i("BLE ${tag(link)} pairing completed")
         pairing.succeeded()
     }
 
@@ -406,12 +445,14 @@ class BridgeEngine(
                 return
             }
             if (m.version != RequestValidator.PROTOCOL_VERSION) {
+                PumpLog.i("BLE ${tag(link)} handshake: sessionReject unsupportedProtocol")
                 sendPlainRaw(link, HandshakeCodec.sessionReject("unsupportedProtocol"))
                 return
             }
             val ltk = identity.ltk()
             val bound = identity.clientId()
             if (ltk == null || (bound != null && bound != m.clientId)) {
+                PumpLog.i("BLE ${tag(link)} handshake: sessionReject unknownClient")
                 sendPlainRaw(link, HandshakeCodec.sessionReject("unknownClient"))
                 return
             }
@@ -421,7 +462,9 @@ class BridgeEngine(
             link.opener = OpeningChannel(sk, Envelope.DIR_IPHONE_TO_BRIDGE)
             link.pendingClientId = m.clientId
             link.phase = Phase.SESSION_PENDING
+            link.phaseSince = clock()
             link.sessionDeadline = clock() + SESSION_FIRST_MESSAGE_TIMEOUT_MS
+            PumpLog.i("BLE ${tag(link)} handshake: sessionResp sent, waiting for first encrypted message")
             sendPlainRaw(link, HandshakeCodec.sessionResp(hex(identity.bridgeId), nonceB, PairingCrypto.sessionMac(ltk, m.nonce, nonceB)))
             sk.fill(0)
             ltk.fill(0)
@@ -443,15 +486,27 @@ class BridgeEngine(
             return
         }
         synchronized(lock) {
+            if (link.closed) return
             if (link.phase == Phase.SESSION_PENDING) {
                 link.phase = Phase.ACTIVE
+                link.phaseSince = clock()
                 // Authenticated: bind the client identity if this is the first session after pairing.
                 val cid = link.pendingClientId
                 if (cid != null && identity.clientId() == null) {
                     try { identity.bindClientId(cid) } catch (e: Exception) { PumpLog.w("bind clientId failed", e) }
                 }
-                // Anything else that has not finished a session is replaced by this one.
-                links.values.filter { it.id != link.id && it.phase != Phase.ACTIVE }.toList().forEach { dropLocked(it, "superseded") }
+                // PROTOCOL.md 1a: the paired client proved itself on this link, so every OLDER link is stale (a ghost
+                // session whose disconnect was never reported, an abandoned handshake) and is closed at once. Only a
+                // link in the middle of pairing is spared (the user is comparing codes; it has its own deadline), and
+                // links that connected after this one keep going: if one of them authenticates it displaces this one.
+                val older = links.values.filter { it !== link && it.order < link.order && it.phase != Phase.PAIRING }.toList()
+                older.forEach { dropLocked(it, "preempted by newer authenticated link ${tag(link)}") }
+                PumpLog.i("BLE ${tag(link)} session established (${(clock() - link.connectedAt)} ms after connect, preempted ${older.size})")
+                try {
+                    linkEvents.onSessionEstablished(link.id, older.size)
+                } catch (t: Throwable) {
+                    PumpLog.w("link event listener failed", t)
+                }
                 updatePhoneStateLocked()
             }
         }
@@ -472,17 +527,21 @@ class BridgeEngine(
             sendEncrypted(link, Wire.error(id, ErrorCode.INVALID_ARGS, "request id was already used in this session"))
             return
         }
-        if (link.inflight.incrementAndGet() > MAX_INFLIGHT_PER_LINK) {
+        // `ping` is liveness only (no pump traffic): it must be answered even when real requests are queued up.
+        val isPing = (frame["op"] as? JsonPrimitive)?.takeIf { it.isString }?.content == "ping"
+        if (!isPing && link.inflight.incrementAndGet() > MAX_INFLIGHT_PER_LINK) {
             link.inflight.decrementAndGet()
             sendEncrypted(link, Wire.error(id, ErrorCode.BUSY, "Too many requests in flight"))
             return
         }
+        onRequestStart()
         scope.launch(exceptionHandler) {
             try {
                 val response = dispatcher.handle(frame)
                 sendEncrypted(link, response)
             } finally {
-                link.inflight.decrementAndGet()
+                if (!isPing) link.inflight.decrementAndGet()
+                onRequestEnd()
             }
         }
     }
@@ -500,6 +559,7 @@ class BridgeEngine(
 
     private fun sendEncrypted(link: Link, obj: JsonObject) {
         try {
+            if (link.closed) return
             synchronized(link) {
                 val sealer = link.sealer ?: return
                 val envelope = sealer.seal(Wire.encode(obj))
@@ -514,6 +574,7 @@ class BridgeEngine(
 
     private fun sendPlainRaw(link: Link, json: ByteArray) {
         try {
+            if (link.closed) return
             synchronized(link) { transmit(link, Envelope.plaintext(json)) }
         } catch (t: Throwable) {
             PumpLog.w("send failed", t)
@@ -526,7 +587,7 @@ class BridgeEngine(
         link.seqOut = (link.seqOut + 1) and 0xFFFF
         if (!transmitter.send(link.id, link.generation, fragments)) {
             // Not inline: callers hold the link lock and dropLocked needs the engine lock (lock order).
-            scope.launch(exceptionHandler) { synchronized(lock) { if (links[link.id] === link) dropLocked(link, "transmit queue full or link gone") } }
+            scope.launch(exceptionHandler) { synchronized(lock) { if (links[link.id] === link) dropLocked(link, "notification could not be queued (link gone or queue full)") } }
         }
     }
 

@@ -37,6 +37,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import app.trio.insightbridge.BridgeRuntime
 import app.trio.insightbridge.R
+import app.trio.insightbridge.service.BridgeService
+import kotlinx.coroutines.launch
 import app.trio.insightbridge.ui.components.BigButton
 import app.trio.insightbridge.ui.components.ButtonStyle
 import app.trio.insightbridge.ui.components.IbChoiceDialog
@@ -57,8 +59,10 @@ fun MainActions(
     onRepairPhone: () -> Unit,
     logOpen: Boolean,
     onToggleLog: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onNote: (Int) -> Unit = {}
 ) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     var dialog by rememberSaveable { mutableIntStateOf(D_NONE) }
     var alwaysOn by remember { mutableStateOf(rt.settings.alwaysOnLink) }
     val dismiss = { dialog = D_NONE }
@@ -72,12 +76,26 @@ fun MainActions(
             trailing = {
                 IbSwitch(alwaysOn)
             },
-            modifier = Modifier.toggleable(value = alwaysOn, role = Role.Switch, onValueChange = { alwaysOn = it; rt.setAlwaysOn(it) })
+            modifier = Modifier.toggleable(value = alwaysOn, role = Role.Switch, onValueChange = {
+                alwaysOn = it
+                rt.setAlwaysOn(it)
+                onNote(if (it) R.string.note_link_always else R.string.note_link_on_demand)
+            })
         )
         Separator()
         SettingsRow(stringResource(R.string.ui_repair_pump), onClick = { dialog = D_REPAIR_PUMP })
         Separator()
         SettingsRow(stringResource(R.string.ui_repair_phone), onClick = onRepairPhone)
+        Separator()
+        SettingsRow(
+            title = stringResource(R.string.ui_restart_ble),
+            description = stringResource(R.string.ui_restart_ble_explain),
+            onClick = {
+                // Rebuilds GATT server + advertising. If the service itself is gone, start it (it comes up advertising).
+                if (!rt.restartBle("user pressed restart")) BridgeService.start(ctx)
+                onNote(R.string.note_ble_restarted)
+            }
+        )
         Separator()
         SettingsRow(stringResource(R.string.ui_log_title), onClick = onToggleLog, trailingText = if (logOpen) "−" else "+")
         Separator()
@@ -106,7 +124,12 @@ fun MainActions(
             text = stringResource(R.string.dlg_unpair_pump_body),
             confirmLabel = stringResource(R.string.ui_unpair_pump_confirm),
             destructive = true,
-            onConfirm = { dialog = D_NONE; rt.unpairPump() },
+            onConfirm = {
+                dialog = D_NONE
+                // Off the UI thread: resetting the pump connection takes its monitor.
+                rt.scope.launch(kotlinx.coroutines.Dispatchers.Default) { rt.unpairPump() }
+                onNote(R.string.note_pump_unpaired)
+            },
             onDismiss = dismiss
         )
         D_UNPAIR_PHONE -> IbConfirmDialog(
@@ -114,7 +137,11 @@ fun MainActions(
             text = stringResource(R.string.dlg_unpair_phone_body),
             confirmLabel = stringResource(R.string.ui_unpair_phone_confirm),
             destructive = true,
-            onConfirm = { dialog = D_NONE; rt.unpairPhone() },
+            onConfirm = {
+                dialog = D_NONE
+                rt.scope.launch(kotlinx.coroutines.Dispatchers.Default) { rt.unpairPhone() }
+                onNote(R.string.note_phone_unpaired)
+            },
             onDismiss = dismiss
         )
     }

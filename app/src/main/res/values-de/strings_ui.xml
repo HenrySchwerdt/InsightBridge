@@ -446,4 +446,29 @@
     <string name="pump_fail_sim_body">Solange die simulierte Pumpe eingeschaltet ist, kann keine echte Pumpe gekoppelt werden. Schalten Sie zuerst den Simulator in den Entwicklereinstellungen aus.</string>
     <string name="ui_share_log">Protokoll teilen</string>
     <string name="wz_pump_fail_detail_label">Technische Details</string>
+
+    <!-- Verbindungszustand, Rückmeldungen (v1.0.2) -->
+    <string name="ui_refresh_not_paired">Es ist noch keine Pumpe gekoppelt. Mit \"Pumpe neu koppeln\" unten koppeln Sie eine.</string>
+    <string name="ui_refresh_error">Das Lesen der Pumpe ist fehlgeschlagen. Die Werte oben sind die zuletzt bekannten.</string>
+    <string name="ui_health_title">Verbindungszustand</string>
+    <string name="ui_health_advertising">Für das iPhone sichtbar (Advertising)</string>
+    <string name="ui_health_sessions">iPhone-Sitzungen in den letzten 24 h</string>
+    <string name="ui_health_last_disc">Letzte iPhone-Trennung</string>
+    <string name="ui_health_last_disc_none">Noch keine</string>
+    <string name="ui_health_adv_error">Letzter Advertising-Fehlercode: %1$d</string>
+    <string name="ui_on">An</string>
+    <string name="ui_off">Aus</string>
+    <string name="ui_restart_ble">Bluetooth-Verbindung neu starten</string>
+    <string name="ui_restart_ble_explain">Baut neu auf, womit sich das iPhone verbindet. Nutzen Sie das, wenn Trio die Bridge nicht findet.</string>
+    <string name="note_pump_unpaired">Pumpe entkoppelt. Mit \"Pumpe neu koppeln\" koppeln Sie wieder.</string>
+    <string name="note_phone_unpaired">iPhone entkoppelt. Mit \"iPhone neu koppeln\" koppeln Sie wieder.</string>
+    <string name="note_link_always">Die Pumpenverbindung bleibt jetzt dauerhaft offen.</string>
+    <string name="note_link_on_demand">Die Bridge verbindet sich nur noch bei Bedarf mit der Pumpe.</string>
+    <string name="note_ble_restarted">Bluetooth-Verbindung neu gestartet. Das iPhone kann sich jetzt wieder verbinden.</string>
+    <string name="note_sim_off">Simulator ausgeschaltet.</string>
+    <string name="ui_copy_log">Protokoll kopieren</string>
+    <string name="ui_log_copied">Protokoll in die Zwischenablage kopiert.</string>
+    <string name="ui_log_copy_failed">Das Protokoll konnte nicht kopiert werden.</string>
+    <string name="ui_log_share_failed">Keine App konnte das Protokoll annehmen. Nutzen Sie \"Protokoll kopieren\".</string>
+    <string name="wz_phone_not_visible">Die Bridge ist für das iPhone noch nicht sichtbar (Bluetooth-Advertising ist aus). Warten Sie einige Sekunden. Bleibt das so, gehen Sie zurück und nutzen auf dem Hauptbildschirm \"Bluetooth-Verbindung neu starten\".</string>
 </resources>

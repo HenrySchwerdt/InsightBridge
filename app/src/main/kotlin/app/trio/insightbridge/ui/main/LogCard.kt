@@ -16,7 +16,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import app.trio.insightbridge.service.HealthSnapshot
+import app.trio.insightbridge.ui.components.BigButton
+import app.trio.insightbridge.ui.components.ButtonStyle
+import app.trio.insightbridge.util.LogShare
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -30,7 +40,7 @@ import app.trio.insightbridge.util.LogLine
 
 /** Read-only log, newest line at the bottom. The core never writes secrets into it. */
 @Composable
-fun LogCard(lines: List<LogLine>, modifier: Modifier = Modifier) {
+fun LogCard(lines: List<LogLine>, health: HealthSnapshot, modifier: Modifier = Modifier) {
     val text = remember(lines) { lines.joinToString("\n") { LogBuffer.format(it) } }
     val scroll = rememberScrollState()
     val c = IbTheme.colors
@@ -48,10 +58,19 @@ fun LogCard(lines: List<LogLine>, modifier: Modifier = Modifier) {
             Text(text.ifEmpty { stringResource(R.string.ui_log_empty) }, style = IbMono, color = c.foreground)
         }
         val ctx = androidx.compose.ui.platform.LocalContext.current
-        app.trio.insightbridge.ui.components.BigButton(
+        var feedback by remember { mutableStateOf<Int?>(null) }
+        BigButton(
             stringResource(R.string.ui_share_log),
-            { app.trio.insightbridge.util.LogShare.share(ctx, lines) },
-            style = app.trio.insightbridge.ui.components.ButtonStyle.Secondary
+            { feedback = if (LogShare.share(ctx, lines, LogShare.healthSummary(health))) null else R.string.ui_log_share_failed },
+            style = ButtonStyle.Secondary
         )
+        BigButton(
+            stringResource(R.string.ui_copy_log),
+            { feedback = if (LogShare.copy(ctx, lines, LogShare.healthSummary(health))) R.string.ui_log_copied else R.string.ui_log_copy_failed },
+            style = ButtonStyle.Secondary
+        )
+        feedback?.let {
+            Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = c.mutedForeground, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        }
     }
 }

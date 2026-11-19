@@ -5,6 +5,7 @@ import app.trio.insightbridge.backend.AlertCatalog
 import app.trio.insightbridge.backend.BolusStarted
 import app.trio.insightbridge.backend.PumpBackend
 import app.trio.insightbridge.protocol.ErrorCode
+import app.trio.insightbridge.protocol.PumpLinkState
 import app.trio.insightbridge.protocol.PumpOpException
 import app.trio.insightbridge.protocol.Request
 import app.trio.insightbridge.protocol.RequestParser
@@ -44,6 +45,7 @@ class OpDispatcher(
 ) {
 
     private val dosingMutex = Mutex()
+    private val startedAt = clock()
 
     /** Handles one request frame and returns the response object. Never throws (except cancellation). */
     suspend fun handle(frame: JsonObject): JsonObject {
@@ -72,6 +74,18 @@ class OpDispatcher(
 
     private suspend fun execute(id: Long, request: Request): JsonObject = when (request) {
         is Request.Hello -> Wire.ok(id, Wire.helloResult(bridgeVersion, backend()?.isPaired == true))
+        // Liveness only: reads cached state, never suspends, never touches the pump link.
+        is Request.Ping -> {
+            val b = backend()
+            Wire.ok(
+                id,
+                Wire.pingResult(
+                    ((clock() - startedAt) / 1000).coerceAtLeast(0),
+                    b?.linkState?.value?.wire ?: PumpLinkState.NOT_PAIRED.wire,
+                    b?.cachedStatus()?.timestamp
+                )
+            )
+        }
         is Request.GetRequestOutcome -> {
             val l = store.lookup(request.requestId)
             val o = l.outcome

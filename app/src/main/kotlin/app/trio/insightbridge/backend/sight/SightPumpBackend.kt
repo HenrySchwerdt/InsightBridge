@@ -478,6 +478,8 @@ class SightPumpBackend(
             c
         }
         if (changed && dto != null) _events.tryEmit(BackendEvent.AlertChanged(dto))
+        // The status object carries activeAlert: re-publish so the main screen and the phone see an alert appear AND clear.
+        if (changed) publishStatus()
     }
 
     private suspend fun updateProfile() {

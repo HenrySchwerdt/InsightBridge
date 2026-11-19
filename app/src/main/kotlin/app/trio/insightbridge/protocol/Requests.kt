@@ -35,6 +35,8 @@ sealed interface Request {
     data class SnoozeAlert(val alertId: Int, val alertType: String) : Request { override val op = "snoozeAlert" }
     data object PumpPairingStatus : Request { override val op = "pumpPairingStatus" }
     data class GetRequestOutcome(val requestId: String) : Request { override val op = "getRequestOutcome" }
+    /** Liveness check (PROTOCOL.md 5.1): answered without any pump traffic. */
+    data object Ping : Request { override val op = "ping" }
 
     /** Ops that carry a requestId and are executed at most once. */
     val requestIdOrNull: String?
@@ -152,6 +154,7 @@ object RequestParser {
             "snoozeAlert" -> Request.SnoozeAlert(int(args, "alertId"), string(args, "alertType"))
             "pumpPairingStatus" -> Request.PumpPairingStatus
             "getRequestOutcome" -> Request.GetRequestOutcome(uuid(args))
+            "ping" -> Request.Ping
             else -> bad("unknown op")
         }
     }
