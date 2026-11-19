@@ -15,6 +15,8 @@ import app.trio.insightbridge.backend.sight.LinkMode
 import app.trio.insightbridge.backend.sight.SightPumpBackend
 import app.trio.insightbridge.engine.IdempotencyStore
 import app.trio.insightbridge.engine.PairingController
+import app.trio.insightbridge.backend.BackendKind
+import app.trio.insightbridge.protocol.ErrorCode
 import app.trio.insightbridge.protocol.PumpOpException
 import app.trio.insightbridge.service.HealthSnapshot
 import app.trio.insightbridge.service.Notifications
@@ -70,6 +72,16 @@ class BridgeRuntime(val app: Application) {
 
     /** Set by the running [app.trio.insightbridge.service.BridgeCore]; drops the connected iPhone. */
     @Volatile var disconnectPhoneHook: (() -> Unit)? = null
+
+    /** Set by the running core; rebuilds the GATT server and advertising (user pressed "restart"). False if the core is not running. */
+    @Volatile var restartBleHook: ((String) -> Unit)? = null
+
+    /** Rebuilds the BLE side. Returns false when the bridge service is not running (the caller should start it). */
+    fun restartBle(reason: String): Boolean {
+        val hook = restartBleHook ?: return false
+        hook(reason)
+        return true
+    }
 
     /** Debug builds only: lets the developer screen preview wizard states (UI only, no pairing happens). */
     @Volatile var debugPumpFlow: app.trio.insightbridge.service.PumpPairingFlow? = null
@@ -139,12 +151,14 @@ class BridgeRuntime(val app: Application) {
     }
 
     fun setAlwaysOn(enabled: Boolean) {
+        PumpLog.i("Pump link mode: ${if (enabled) "always on" else "on demand"}")
         settings.alwaysOnLink = enabled
         sight?.linkMode = if (enabled) LinkMode.ALWAYS_ON else LinkMode.ON_DEMAND
     }
 
     /** Forgets the paired iPhone (the user must pair again) and drops its connection. */
     fun unpairPhone() {
+        PumpLog.i("iPhone unpaired by user")
         identity.clearPairing()
         pairing.cancel()
         disconnectPhoneHook?.invoke()
@@ -152,19 +166,35 @@ class BridgeRuntime(val app: Application) {
 
     /** Forgets the pump pairing and (if the simulator ran) leaves simulator mode. */
     fun unpairPump() {
+        PumpLog.i("Pump unpaired by user")
         connection.reset()
         status.value = null
         refreshBackend()
     }
 
-    /** Pull-to-refresh: reads the pump now (falls back to the last known status). */
-    suspend fun refreshStatusNow(): Boolean {
-        val b = backend.value ?: return false
+    /** Outcome of the "Refresh pump status" button. */
+    enum class RefreshResult { OK, NOT_PAIRED, UNREACHABLE, ERROR }
+
+    /**
+     * Reads the pump now. [RefreshResult.OK] only if the pump really answered (the status timestamp moved); the
+     * backend falls back to its cached status when the pump is unreachable, which must not be reported as success.
+     */
+    suspend fun refreshStatusNow(): RefreshResult {
+        val b = backend.value
+        if (b == null || !b.isPaired) return RefreshResult.NOT_PAIRED
+        val before = b.cachedStatus()?.timestamp
         return try {
-            status.value = b.getStatus()
-            true
+            val s = b.getStatus()
+            status.value = s
+            if (b.kind == BackendKind.SIMULATED || (s.timestamp != null && s.timestamp != before)) RefreshResult.OK else RefreshResult.UNREACHABLE
         } catch (e: PumpOpException) {
-            false
+            PumpLog.w("Refresh failed: ${e.code.wire}")
+            if (e.code == ErrorCode.PUMP_UNREACHABLE) RefreshResult.UNREACHABLE else RefreshResult.ERROR
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PumpLog.w("Refresh failed: ${e.javaClass.simpleName}")
+            RefreshResult.ERROR
         }
     }
 

@@ -446,4 +446,29 @@
     <string name="pump_fail_sim_body">A real pump cannot be paired while the simulated pump is switched on. Switch the simulator off in the developer settings first.</string>
     <string name="ui_share_log">Share log</string>
     <string name="wz_pump_fail_detail_label">Technical details</string>
+
+    <!-- connection health, actions feedback (v1.0.2) -->
+    <string name="ui_refresh_not_paired">No pump is paired yet. Use \"Re-pair pump\" below to pair one.</string>
+    <string name="ui_refresh_error">Reading the pump failed. The values above are the last known ones.</string>
+    <string name="ui_health_title">Connection health</string>
+    <string name="ui_health_advertising">Visible to the iPhone (advertising)</string>
+    <string name="ui_health_sessions">iPhone sessions in the last 24 h</string>
+    <string name="ui_health_last_disc">Last iPhone disconnect</string>
+    <string name="ui_health_last_disc_none">None yet</string>
+    <string name="ui_health_adv_error">Last advertising error code: %1$d</string>
+    <string name="ui_on">On</string>
+    <string name="ui_off">Off</string>
+    <string name="ui_restart_ble">Restart Bluetooth connection</string>
+    <string name="ui_restart_ble_explain">Rebuilds what the iPhone connects to. Use it if Trio cannot find the bridge.</string>
+    <string name="note_pump_unpaired">Pump unpaired. Tap \"Re-pair pump\" to pair a pump again.</string>
+    <string name="note_phone_unpaired">iPhone unpaired. Tap \"Re-pair iPhone\" to pair again.</string>
+    <string name="note_link_always">The pump connection is now kept open.</string>
+    <string name="note_link_on_demand">The bridge now connects to the pump only when needed.</string>
+    <string name="note_ble_restarted">Bluetooth connection restarted. The iPhone can reconnect now.</string>
+    <string name="note_sim_off">Simulator switched off.</string>
+    <string name="ui_copy_log">Copy log</string>
+    <string name="ui_log_copied">Log copied to the clipboard.</string>
+    <string name="ui_log_copy_failed">The log could not be copied.</string>
+    <string name="ui_log_share_failed">No app could take the log. Use \"Copy log\" instead.</string>
+    <string name="wz_phone_not_visible">The bridge is not visible to the iPhone yet (Bluetooth advertising is off). Wait a few seconds. If this stays, go back and use \"Restart Bluetooth connection\" on the main screen.</string>
 </resources>

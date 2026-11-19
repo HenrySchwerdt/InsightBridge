@@ -94,6 +94,13 @@ object Wire {
         put("completedAt", if (completedAt == null) JsonNull else JsonPrimitive(completedAt))
     }
 
+    /** ping result (PROTOCOL.md 5.1): no pump traffic. */
+    fun pingResult(uptimeSeconds: Long, pumpLink: String, statusTimestamp: String?) = buildJsonObject {
+        put("uptimeSeconds", uptimeSeconds)
+        put("pumpLink", pumpLink)
+        put("statusTimestamp", if (statusTimestamp == null) JsonNull else JsonPrimitive(statusTimestamp))
+    }
+
     fun pairingStatusResult(paired: Boolean, serial: String?, bluetoothOn: Boolean) = buildJsonObject {
         put("paired", paired)
         put("serial", if (serial == null) JsonNull else JsonPrimitive(serial))

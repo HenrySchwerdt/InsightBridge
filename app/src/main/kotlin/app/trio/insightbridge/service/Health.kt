@@ -25,7 +25,13 @@ data class HealthSnapshot(
     val phonePaired: Boolean = false,
     val permissionsOk: Boolean = true,
     val notificationsOk: Boolean = true,
-    val batteryExempt: Boolean = true
+    val batteryExempt: Boolean = true,
+    /** iPhone sessions established in the last 24 h (connection health). */
+    val sessions24h: Int = 0,
+    val lastDisconnectAt: Long = 0,
+    val lastDisconnectReason: String? = null,
+    val gattConnections: Int = 0,
+    val advertiseError: Int = 0
 ) {
 
     val uptimeMs: Long get() = if (serviceStartedAt == 0L) 0 else (now - serviceStartedAt).coerceAtLeast(0)
@@ -40,6 +46,6 @@ data class HealthSnapshot(
             if (!batteryExempt) add(Warning.BATTERY_OPTIMIZATION)
             if (!notificationsOk) add(Warning.NOTIFICATIONS_OFF)
             if (simulatorConflict) add(Warning.SIMULATOR_CONFLICT)
-            if (serviceRunning && bluetoothOn && permissionsOk && phonePaired && !advertising && phoneLink == PhoneLinkState.NONE) add(Warning.NOT_ADVERTISING)
+            if (serviceRunning && bluetoothOn && permissionsOk && phonePaired && !advertising) add(Warning.NOT_ADVERTISING)
         }
 }

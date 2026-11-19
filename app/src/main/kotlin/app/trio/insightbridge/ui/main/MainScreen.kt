@@ -44,6 +44,9 @@ import app.trio.insightbridge.ui.components.VersionLabel
 import app.trio.insightbridge.ui.theme.IbTheme
 import app.trio.insightbridge.ui.util.rememberNow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.runtime.LaunchedEffect
+import app.trio.insightbridge.ui.components.IbAlert
 
 /** Main screen after setup: warnings, alert, link health, last pump status, actions and log. */
 @Composable
@@ -53,32 +56,55 @@ fun MainScreen(rt: BridgeRuntime, onRepairPump: () -> Unit, onRepairPhone: () ->
     val logLines by rt.log.flow.collectAsStateWithLifecycle()
     val now = rememberNow()
     val scope = rememberCoroutineScope()
+    val scroll = rememberScrollState()
     var refreshing by remember { mutableStateOf(false) }
     var refreshFeedback by remember { mutableStateOf<Int?>(null) }
     var logOpen by remember { mutableStateOf(false) }
     var alertBusy by remember { mutableStateOf(false) }
     var alertFeedback by remember { mutableStateOf<Int?>(null) }
+    // Result line of settings actions (unpair, link mode, restart...): every tap has a visible outcome.
+    var note by remember { mutableStateOf<Int?>(null) }
 
     fun refresh() {
+        if (refreshing) return
         scope.launch {
             refreshing = true
-            refreshFeedback = if (rt.refreshStatusNow()) R.string.ui_refresh_ok else R.string.ui_refresh_failed
+            refreshFeedback = null
+            val result = withTimeoutOrNull(REFRESH_TIMEOUT_MS) { rt.refreshStatusNow() }
+            refreshFeedback = when (result) {
+                BridgeRuntime.RefreshResult.OK -> R.string.ui_refresh_ok
+                BridgeRuntime.RefreshResult.NOT_PAIRED -> R.string.ui_refresh_not_paired
+                BridgeRuntime.RefreshResult.UNREACHABLE, null -> R.string.ui_refresh_failed
+                BridgeRuntime.RefreshResult.ERROR -> R.string.ui_refresh_error
+            }
             refreshing = false
         }
     }
 
     fun alertAction(alert: AlertDto, confirm: Boolean) {
+        if (alertBusy) return
         scope.launch {
             alertBusy = true
-            val ok = if (confirm) rt.userConfirmAlert(alert.alertId, alert.alertType) else rt.userSnoozeAlert(alert.alertId, alert.alertType)
+            alertFeedback = null
+            val ok = withTimeoutOrNull(REFRESH_TIMEOUT_MS) {
+                if (confirm) rt.userConfirmAlert(alert.alertId, alert.alertType) else rt.userSnoozeAlert(alert.alertId, alert.alertType)
+            } ?: false
             alertFeedback = if (ok) R.string.ui_alert_done else R.string.ui_alert_failed
-            if (ok) rt.refreshStatusNow()
+            if (ok) withTimeoutOrNull(REFRESH_TIMEOUT_MS) { rt.refreshStatusNow() }
             alertBusy = false
         }
     }
 
+    // Opening the log appends a card below the fold: scroll it into view so the tap visibly does something.
+    LaunchedEffect(logOpen) {
+        if (logOpen) {
+            kotlinx.coroutines.yield()
+            scroll.animateScrollTo(scroll.maxValue)
+        }
+    }
+
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp),
+        Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 24.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -96,7 +122,8 @@ fun MainScreen(rt: BridgeRuntime, onRepairPump: () -> Unit, onRepairPhone: () ->
                 dot = pumpDot(health.pumpLink)
             )
         }
-        HealthWarnings(rt, health.warnings)
+        note?.let { IbAlert(description = stringResource(it), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+        HealthWarnings(rt, health.warnings) { note = it }
         status?.activeAlert?.let { alert ->
             AlertCard(
                 alert = alert,
@@ -117,11 +144,14 @@ fun MainScreen(rt: BridgeRuntime, onRepairPump: () -> Unit, onRepairPhone: () ->
             Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = IbTheme.colors.mutedForeground, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
         }
         LinkCards(health, now)
-        MainActions(rt, onRepairPump, onRepairPhone, logOpen, { logOpen = !logOpen })
-        if (logOpen) LogCard(logLines)
+        ConnectionHealthCard(health, now)
+        MainActions(rt, onRepairPump, onRepairPhone, logOpen, { logOpen = !logOpen }, onNote = { note = it })
+        if (logOpen) LogCard(logLines, health)
         VersionLabel(onDeveloper = LocalOpenDeveloper.current)
     }
 }
+
+private const val REFRESH_TIMEOUT_MS = 45_000L
 
 @Composable
 private fun Summary(problems: Int, running: Boolean) {

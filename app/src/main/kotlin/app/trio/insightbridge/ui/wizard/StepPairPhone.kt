@@ -26,7 +26,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.trio.insightbridge.R
 import app.trio.insightbridge.engine.PairingController
 import app.trio.insightbridge.engine.PairingUiState
+import app.trio.insightbridge.service.BridgeService
 import app.trio.insightbridge.ui.components.BigButton
+import app.trio.insightbridge.ui.components.IbAlert
 import app.trio.insightbridge.ui.components.BigCode
 import app.trio.insightbridge.ui.components.ButtonStyle
 import app.trio.insightbridge.ui.components.RuledCard
@@ -48,8 +50,15 @@ fun PhoneStep(
     phonePaired: Boolean,
     onBack: (() -> Unit)?,
     resetStale: Boolean,
-    onFinished: () -> Unit
+    onFinished: () -> Unit,
+    bridgeVisible: Boolean = true
 ) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    // Opening the pairing window needs the bridge service (it owns the Bluetooth side): make sure it runs.
+    val openWindow = {
+        BridgeService.start(ctx)
+        pairing.open()
+    }
     val state by pairing.state.collectAsStateWithLifecycle()
     // Stale Done/Failed from an earlier session must not be shown as fresh results.
     LaunchedEffect(Unit) {
@@ -58,19 +67,19 @@ fun PhoneStep(
     }
     val back: (() -> Unit)? = onBack?.let { b -> { pairing.cancel(); b() } }
     when (val s = state) {
-        PairingUiState.Idle -> if (phonePaired) AlreadyPaired(pairing, back, onFinished) else Intro(pairing, back)
-        is PairingUiState.Waiting -> Waiting(pairing, s.secondsLeft, back)
+        PairingUiState.Idle -> if (phonePaired) AlreadyPaired(pairing, openWindow, back, onFinished) else Intro(openWindow, back)
+        is PairingUiState.Waiting -> Waiting(pairing, s.secondsLeft, bridgeVisible, back)
         is PairingUiState.ConfirmCode -> Confirm(pairing, s)
         PairingUiState.Done -> Done(onFinished)
-        is PairingUiState.Failed -> Failed(pairing, s.reason, back)
+        is PairingUiState.Failed -> Failed(openWindow, s.reason, back)
     }
 }
 
 @Composable
-private fun Intro(pairing: PairingController, onBack: (() -> Unit)?) {
+private fun Intro(openWindow: () -> Unit, onBack: (() -> Unit)?) {
     WizardFrame(
         step = STEP, totalSteps = TOTAL, title = stringResource(R.string.wz_phone_title), onBack = onBack,
-        actions = { BigButton(stringResource(R.string.wz_phone_pair_button), { pairing.open() }) },
+        actions = { BigButton(stringResource(R.string.wz_phone_pair_button), openWindow) },
         footer = { TroubleshootSection(Troubles.phoneAll, key = "ts-phone-intro") }
     ) {
         Text(stringResource(R.string.wz_phone_intro), style = MaterialTheme.typography.bodyLarge, color = IbTheme.colors.mutedForeground)
@@ -81,12 +90,12 @@ private fun Intro(pairing: PairingController, onBack: (() -> Unit)?) {
 }
 
 @Composable
-private fun AlreadyPaired(pairing: PairingController, onBack: (() -> Unit)?, onFinished: () -> Unit) {
+private fun AlreadyPaired(pairing: PairingController, openWindow: () -> Unit, onBack: (() -> Unit)?, onFinished: () -> Unit) {
     WizardFrame(
         step = STEP, totalSteps = TOTAL, title = stringResource(R.string.wz_phone_already_title), onBack = onBack,
         actions = {
             BigButton(stringResource(R.string.ui_next), onFinished)
-            BigButton(stringResource(R.string.wz_phone_pair_again), { pairing.open() }, style = ButtonStyle.Secondary)
+            BigButton(stringResource(R.string.wz_phone_pair_again), openWindow, style = ButtonStyle.Secondary)
         },
         footer = { TroubleshootSection(Troubles.phoneAll, key = "ts-phone-already") }
     ) {
@@ -104,7 +113,7 @@ private fun TrioSteps() {
 }
 
 @Composable
-private fun Waiting(pairing: PairingController, secondsLeft: Int, onBack: (() -> Unit)?) {
+private fun Waiting(pairing: PairingController, secondsLeft: Int, bridgeVisible: Boolean, onBack: (() -> Unit)?) {
     val total = (PairingController.WINDOW_MS / 1000).toInt()
     WizardFrame(
         step = STEP, totalSteps = TOTAL, title = stringResource(R.string.wz_phone_wait_title), onBack = onBack,
@@ -130,6 +139,7 @@ private fun Waiting(pairing: PairingController, secondsLeft: Int, onBack: (() ->
                 drawStopIndicator = {}
             )
         }
+        if (!bridgeVisible) IbAlert(description = stringResource(R.string.wz_phone_not_visible), destructive = true)
         PhonePairIllustration(Modifier.padding(vertical = 8.dp))
         TrioSteps()
         WhatHappensNext(stringResource(R.string.wz_phone_wait_next))
@@ -175,7 +185,7 @@ private fun Done(onFinished: () -> Unit) {
 }
 
 @Composable
-private fun Failed(pairing: PairingController, reason: String, onBack: (() -> Unit)?) {
+private fun Failed(openWindow: () -> Unit, reason: String, onBack: (() -> Unit)?) {
     val kind = PhoneFailureKind.of(reason)
     val (titleRes, bodyRes, topic) = when (kind) {
         PhoneFailureKind.TIMEOUT -> Triple(R.string.wz_phone_fail_timeout_t, R.string.wz_phone_fail_timeout_b, Troubles.phoneTimeout)
@@ -185,7 +195,7 @@ private fun Failed(pairing: PairingController, reason: String, onBack: (() -> Un
     }
     WizardFrame(
         step = STEP, totalSteps = TOTAL, title = stringResource(titleRes), onBack = onBack,
-        actions = { BigButton(stringResource(R.string.ui_try_again), { pairing.open() }) },
+        actions = { BigButton(stringResource(R.string.ui_try_again), openWindow) },
         footer = { TroubleshootSection(Troubles.phoneAll, key = "ts-phone-fail-$reason", highlight = topic) }
     ) {
         RuledCard(rule = IbTheme.colors.danger, container = IbTheme.colors.dangerContainer) {

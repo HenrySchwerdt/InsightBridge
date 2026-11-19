@@ -154,10 +154,10 @@ class PipelineTest {
         val commit = app.trio.insightbridge.protocol.PairingCrypto.commitment(kp.publicKey, ByteArray(16))
         c.sendHandshake(app.trio.insightbridge.protocol.HandshakeCodec.pairStart(commit))
         assertThat(c.takeHandshake()!!["t"]!!.jsonPrimitive.content).isEqualTo("pairResp")
-        // while the first phone is mid-pairing a second central is told "busy" (and does not disturb it)
+        // while the first phone is mid-pairing a second central is accepted but the window's single attempt is used up
         val c2 = rig.central("BB:11")
         c2.sendHandshake(app.trio.insightbridge.protocol.HandshakeCodec.pairStart(commit))
-        assertThat(c2.takeHandshake()!!["code"]!!.jsonPrimitive.content).isEqualTo("busy")
+        assertThat(c2.takeHandshake()!!["reason"]!!.jsonPrimitive.content).isEqualTo("notInPairingMode")
         assertThat(c.isDisconnected()).isFalse()
         // after the first one is gone, a new attempt in the same window is still refused
         rig.engine.onCentralDisconnected("AA:00")
@@ -314,24 +314,23 @@ class PipelineTest {
         assertThat(c.isDisconnected()).isTrue()
     }
 
-    @Test fun secondCentralIsToldBusyWhileASessionIsActive() = runTest {
+    @Test fun secondCentralHandshakesInParallelAndDoesNotDisturbAnActiveSession() = runTest {
         val rig = Rig(this)
         val first = rig.pairedSession()
         first.request("hello", """{"protocol":2}""")
         val second = rig.central("CC:22")
         second.sendHandshake(app.trio.insightbridge.protocol.HandshakeCodec.sessionStart("0123456789abcdef", ByteArray(16)))
-        val r = second.takeHandshake()!!
-        assertThat(r["code"]!!.jsonPrimitive.content).isEqualTo("busy")
-        assertThat(second.isDisconnected()).isTrue()
+        assertThat(second.takeHandshake()!!["t"]!!.jsonPrimitive.content).isEqualTo("sessionResp") // no "busy" any more
+        assertThat(second.isDisconnected()).isFalse()
         assertThat(first.isDisconnected()).isFalse()
         assertThat(first.ok(first.request("getStatus"))).isTrue()
     }
 
-    @Test fun newCentralReplacesALinkThatNeverFinishedAHandshake() = runTest {
+    @Test fun twoLinksThatNeverFinishedAHandshakeCoexistUntilTheyTimeOut() = runTest {
         val rig = Rig(this)
         val stale = rig.central("AA:00")
         val fresh = rig.central("BB:11")
-        assertThat(stale.isDisconnected()).isTrue()
+        assertThat(stale.isDisconnected()).isFalse()
         assertThat(fresh.isDisconnected()).isFalse()
     }
 

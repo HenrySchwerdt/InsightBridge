@@ -49,7 +49,7 @@ class FakeLink : LinkTransmitter {
 
 /** Everything wired together exactly like [app.trio.insightbridge.service.BridgeCore], minus Android. */
 @OptIn(ExperimentalCoroutinesApi::class)
-class Rig(val scope: TestScope, val bridgeVersion: String = "test", maxStoreEntries: Int = 5000) {
+class Rig(val scope: TestScope, val bridgeVersion: String = "test", maxStoreEntries: Int = 5000, linkEvents: LinkEventListener = LinkEventListener.None) {
 
     var now = 1_800_000_000_000L
     val clock: () -> Long = { now }
@@ -65,7 +65,7 @@ class Rig(val scope: TestScope, val bridgeVersion: String = "test", maxStoreEntr
         backend = { sim }, store = store, clock = clock, bridgeVersion = bridgeVersion,
         onRequest = { requestsSeen.add(it) }
     )
-    val engine = BridgeEngine(scope, clock, identity, pairing, dispatcher, link, SecureRandom(), onPhoneActivity = { phoneActivity++ })
+    val engine = BridgeEngine(scope, clock, identity, pairing, dispatcher, link, SecureRandom(), onPhoneActivity = { phoneActivity++ }, linkEvents = linkEvents)
     val broadcast = ArrayList<JsonObject>()
 
     init {
